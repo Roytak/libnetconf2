@@ -840,6 +840,7 @@ nc_server_destroy(void)
     }
 
     nc_server_configure_listen(NC_OP_DELETE);
+    nc_server_config_del_keystore();
     nc_destroy();
 }
 

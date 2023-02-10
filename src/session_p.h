@@ -105,13 +105,25 @@ struct nc_certificate {
 };
 
 struct nc_keystore {
-    char *name;
-    char *pub_base64;
-    char *priv_base64;
-    NC_SSH_KEY_TYPE privkey_type;
+    struct nc_ks_asym_key {
+        char *name;
+        NC_SSH_PUBKEY_TYPE pubkey_type;
+        char *pub_base64;
+        NC_SSH_KEY_TYPE privkey_type;
+        char *priv_base64;
+        struct {
+            char *name;
+            char *cert_base64;
+        } *certs;
+        uint16_t cert_count;
+    } *asym_keys;
+    uint16_t asym_key_count;
 
-    struct nc_certificate *certs;
-    uint16_t cert_count;
+    struct nc_ks_sym_key {
+        char *name;
+        char *base64;
+    } *sym_keys;
+    uint16_t sym_key_count;
 };
 
 struct nc_client_auth {
@@ -122,8 +134,8 @@ struct nc_client_auth {
         struct {
             struct nc_client_auth_pubkey {
                 char *name;
-                char *pub_base64;
                 NC_SSH_PUBKEY_TYPE pubkey_type;
+                char *pub_base64;
             } *pubkeys;
             uint16_t pubkey_count;
         };
@@ -147,7 +159,7 @@ struct nc_hostkey {
             NC_SSH_KEY_TYPE privkey_type;
             char *priv_base64;
         };
-        struct nc_keystore *keystore;
+        struct nc_ks_asym_key *ks_ref;
     };
 };
 
@@ -312,8 +324,7 @@ struct nc_server_opts {
 #endif
 
     pthread_rwlock_t config_lock;
-    struct nc_keystore *keystore; /**< store for keys/certificates */
-    uint16_t keystore_count;
+    struct nc_keystore keystore; /**< store for keys/certificates */
 
     struct nc_bind *binds;
     struct nc_endpt {

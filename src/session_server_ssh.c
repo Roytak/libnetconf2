@@ -1325,8 +1325,8 @@ nc_ssh_bind_add_hostkeys(ssh_bind sbind, struct nc_server_ssh_opts *opts, uint16
             privkey_data = opts->hostkeys[i].priv_base64;
             privkey_path = base64der_key_to_tmp_file(privkey_data, nc_keytype2str(opts->hostkeys[i].privkey_type), 0);
         } else if (opts->hostkeys[i].ks_type == NC_STORE_KEYSTORE) {
-            privkey_data = opts->hostkeys[i].keystore->priv_base64;
-            privkey_path = base64der_key_to_tmp_file(privkey_data, nc_keytype2str(opts->hostkeys[i].keystore->privkey_type), 0);
+            privkey_data = opts->hostkeys[i].ks_ref->priv_base64;
+            privkey_path = base64der_key_to_tmp_file(privkey_data, nc_keytype2str(opts->hostkeys[i].ks_ref->privkey_type), 0);
         } else {
             ERR(NULL, "Internal error, invalid PK store (%d)", opts->hostkeys[i].ks_type);
             return -1;
