@@ -45,9 +45,11 @@
 #include <libyang/libyang.h>
 
 #include "compat.h"
-#include "libnetconf.h"
+#include "config.h"
+#include "log_p.h"
 #include "session_client.h"
 #include "session_client_ch.h"
+#include "session_p.h"
 
 struct nc_client_context *nc_client_context_location(void);
 
@@ -167,9 +169,11 @@ _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts)
     }
     free(opts->keys);
     free(opts->username);
+    free(opts->knownhosts_path);
     opts->key_count = 0;
     opts->keys = NULL;
     opts->username = NULL;
+    opts->knownhosts_path = NULL;
 }
 
 void
@@ -275,118 +279,159 @@ finish:
 
 #endif /* ENABLE_DNSSEC */
 
-int
-sshauth_hostkey_check(const char *hostname, ssh_session session, void *UNUSED(priv))
+static int
+nc_client_ssh_update_known_hosts(ssh_session session, const char *hostname)
 {
-    char *hexa = NULL;
+    int ret;
 
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-    int c, ret;
-    enum ssh_known_hosts_e state;
-#else
-    int c, state, ret;
-#endif
+    ret = ssh_session_update_known_hosts(session);
+    if (ret != SSH_OK) {
+        WRN(NULL, "Adding the known host \"%s\" failed (%s).", hostname, ssh_get_error(session));
+    }
+
+    return ret;
+}
+
+static int
+nc_client_ssh_get_srv_pubkey_data(ssh_session session, enum ssh_keytypes_e *srv_pubkey_type, char **hexa, unsigned char **hash_sha1)
+{
+    int ret;
     ssh_key srv_pubkey;
-    unsigned char *hash_sha1 = NULL;
     size_t hlen;
-    enum ssh_keytypes_e srv_pubkey_type;
-    char answer[5];
-    FILE *out = NULL, *in = NULL;
 
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-    state = ssh_session_is_known_server(session);
-#else
-    state = ssh_is_server_known(session);
-#endif
+    *hexa = NULL;
+    *hash_sha1 = NULL;
 
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 8, 0))
     ret = ssh_get_server_publickey(session, &srv_pubkey);
-#else
-    ret = ssh_get_publickey(session, &srv_pubkey);
-#endif
     if (ret < 0) {
-        ERR(NULL, "Unable to get server public key.");
+        ERR(NULL, "Unable to get server's public key.");
         return -1;
     }
 
-    srv_pubkey_type = ssh_key_type(srv_pubkey);
-    ret = ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_SHA1, &hash_sha1, &hlen);
+    *srv_pubkey_type = ssh_key_type(srv_pubkey);
+    ret = ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_SHA1, hash_sha1, &hlen);
     ssh_key_free(srv_pubkey);
     if (ret < 0) {
         ERR(NULL, "Failed to calculate SHA1 hash of the server public key.");
         return -1;
     }
 
-    hexa = ssh_get_hexa(hash_sha1, hlen);
+    *hexa = ssh_get_hexa(*hash_sha1, hlen);
+    if (!*hexa) {
+        ERR(NULL, "Getting the hostkey's hex string failed.");
+        return -1;
+    }
 
-    switch (state) {
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-    case SSH_KNOWN_HOSTS_OK:
-#else
-    case SSH_SERVER_KNOWN_OK:
-#endif
-        break; /* ok */
+    return 0;
+}
 
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-    case SSH_KNOWN_HOSTS_CHANGED:
-#else
-    case SSH_SERVER_KNOWN_CHANGED:
+#ifdef ENABLE_DNSSEC
+static int
+nc_client_ssh_do_dnssec_sshfp_check(ssh_session session, enum ssh_keytypes_e srv_pubkey_type, const char *hostname, unsigned char *hash_sha1)
+{
+    int ret = 0;
+
+    if ((srv_pubkey_type != SSH_KEYTYPE_UNKNOWN) && (srv_pubkey_type != SSH_KEYTYPE_RSA1)) {
+        if (srv_pubkey_type == SSH_KEYTYPE_DSS) {
+            /* TODO else branch? */
+            ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 2, 1);
+        } else if (srv_pubkey_type == SSH_KEYTYPE_RSA) {
+            ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 1, 1);
+        } else if (srv_pubkey_type == SSH_KEYTYPE_ECDSA) {
+            ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 3, 1);
+        }
+
+        /* DNSSEC SSHFP check successful, that's enough */
+        if (!ret) {
+            VRB(NULL, "DNSSEC SSHFP check successful.");
+            ssh_session_update_known_hosts(session);
+        }
+
+        return ret;
+    }
+
+    return 1;
+}
+
 #endif
-        ERR(NULL, "Remote host key changed, the connection will be terminated!");
+
+static int
+nc_client_ssh_auth_hostkey_check(const char *hostname, uint16_t port, ssh_session session)
+{
+    char *hexa = NULL;
+    unsigned char *hash_sha1 = NULL;
+    NC_SSH_KNOWNHOSTS_MODE knownhosts_mode = ssh_opts.knownhosts_mode;
+    enum ssh_keytypes_e srv_pubkey_type;
+    char answer[5];
+    FILE *out = NULL, *in = NULL;
+    int c, state;
+
+#ifdef ENABLE_DNSSEC
+    int dnssec_ret;
+#endif
+
+    if (knownhosts_mode == NC_SSH_KNOWNHOSTS_SKIP) {
+        /* skip all hostkey checks */
+        return 0;
+    }
+
+    if (nc_client_ssh_get_srv_pubkey_data(session, &srv_pubkey_type, &hexa, &hash_sha1)) {
         goto error;
+    }
 
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
+    state = ssh_session_is_known_server(session);
+    switch (state) {
+    case SSH_KNOWN_HOSTS_OK:
+        break; /* ok */
+    case SSH_KNOWN_HOSTS_CHANGED:
+        if (knownhosts_mode == NC_SSH_KNOWNHOSTS_ACCEPT) {
+            /* is the mode is set to accept, then accept any connection even if the remote key changed */
+            WRN(NULL, "Remote host key changed, but you have requested accept mode so the connection will not be terminated.");
+            break;
+        } else {
+            ERR(NULL, "Remote host key changed, the connection will be terminated!");
+            goto error;
+        }
     case SSH_KNOWN_HOSTS_OTHER:
-#else
-    case SSH_SERVER_FOUND_OTHER:
-#endif
         WRN(NULL, "Remote host key is not known, but a key of another type for this host is known. Continue with caution.");
         goto hostkey_not_known;
-
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
     case SSH_KNOWN_HOSTS_NOT_FOUND:
-#else
-    case SSH_SERVER_FILE_NOT_FOUND:
-#endif
         WRN(NULL, "Could not find the known hosts file.");
         goto hostkey_not_known;
-
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
     case SSH_KNOWN_HOSTS_UNKNOWN:
-#else
-    case SSH_SERVER_NOT_KNOWN:
-#endif
 hostkey_not_known:
 #ifdef ENABLE_DNSSEC
-        if ((srv_pubkey_type != SSH_KEYTYPE_UNKNOWN) && (srv_pubkey_type != SSH_KEYTYPE_RSA1)) {
-            if (srv_pubkey_type == SSH_KEYTYPE_DSS) {
-                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 2, 1);
-            } else if (srv_pubkey_type == SSH_KEYTYPE_RSA) {
-                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 1, 1);
-            } else if (srv_pubkey_type == SSH_KEYTYPE_ECDSA) {
-                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 3, 1);
-            }
-
-            /* DNSSEC SSHFP check successful, that's enough */
-            if (!ret) {
-                VRB(NULL, "DNSSEC SSHFP check successful.");
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-                ssh_session_update_known_hosts(session);
-#else
-                ssh_write_knownhost(session);
-#endif
-                ssh_clean_pubkey_hash(&hash_sha1);
-                ssh_string_free_char(hexa);
-                return 0;
-            }
+        /* do dnssec check, if it's ok then we're done otherwise continue */
+        dnssec_ret = nc_client_ssh_do_dnssec_sshfp_check(session, srv_pubkey_type, hostname, hash_sha1);
+        if (!dnssec_ret) {
+            ssh_clean_pubkey_hash(&hash_sha1);
+            ssh_string_free_char(hexa);
+            return 0;
         }
 #endif
 
+        /* open the files for reading/writing */
         if (!(in = nc_open_in(1, NULL))) {
             goto error;
         }
+
         if (!(out = nc_open_out())) {
             goto error;
+        }
+
+        if (knownhosts_mode == NC_SSH_KNOWNHOSTS_STRICT) {
+            /* do not connect if the hostkey is not present in known_hosts file in this mode */
+            ERR(NULL, "No %s host key is known for [%s]:%hu and you have requested strict checking.\n", ssh_key_type_to_char(srv_pubkey_type), hostname, port);
+            goto error;
+        } else if ((knownhosts_mode == NC_SSH_KNOWNHOSTS_ACCEPT_NEW) || (knownhosts_mode == NC_SSH_KNOWNHOSTS_ACCEPT)) {
+            /* add a new entry to the known_hosts file without prompting */
+            if (nc_client_ssh_update_known_hosts(session, hostname)) {
+                goto error;
+            }
+
+            VRB(NULL, "Permanently added '[%s]:%hu' (%s) to the list of known hosts.", hostname, port, ssh_key_type_to_char(srv_pubkey_type));
+
+            break;
         }
 
         /* try to get result from user */
@@ -400,12 +445,12 @@ hostkey_not_known:
         }
 
 #ifdef ENABLE_DNSSEC
-        if (ret == 2) {
+        if (dnssec_ret == 2) {
             if (fprintf(out, "No matching host key fingerprint found using DNS.\n") < 1) {
                 ERR(NULL, "Writing into output failed (%s).", feof(out) ? "EOF" : strerror(errno));
                 goto error;
             }
-        } else if (ret == 1) {
+        } else if (dnssec_ret == 1) {
             if (fprintf(out, "Matching host key fingerprint found using DNS.\n") < 1) {
                 ERR(NULL, "Writing into output failed (%s).", feof(out) ? "EOF" : strerror(errno));
                 goto error;
@@ -428,15 +473,8 @@ hostkey_not_known:
 
             fflush(in);
             if (!strcmp("yes", answer)) {
-                /* store the key into the host file */
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
-                ret = ssh_session_update_known_hosts(session);
-#else
-                ret = ssh_write_knownhost(session);
-#endif
-                if (ret != SSH_OK) {
-                    WRN(NULL, "Adding the known host \"%s\" failed (%s).", hostname, ssh_get_error(session));
-                }
+                /* store the key into the known_hosts file */
+                nc_client_ssh_update_known_hosts(session, hostname);
             } else if (!strcmp("no", answer)) {
                 goto error;
             } else {
@@ -449,12 +487,7 @@ hostkey_not_known:
         } while (strcmp(answer, "yes") && strcmp(answer, "no"));
 
         break;
-
-#if (LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 9, 0))
     case SSH_KNOWN_HOSTS_ERROR:
-#else
-    case SSH_SERVER_ERROR:
-#endif
         ERR(NULL, "SSH error: %s", ssh_get_error(session));
         goto error;
     }
@@ -645,57 +678,29 @@ error:
     return NULL;
 }
 
-static void
-_nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void *priv, struct nc_client_ssh_opts *opts)
+API int
+nc_client_ssh_set_knownhosts_path(const char *path)
 {
-    if (auth_hostkey_check) {
-        opts->auth_hostkey_check = auth_hostkey_check;
-        opts->auth_hostkey_check_priv = priv;
-    } else {
-        opts->auth_hostkey_check = sshauth_hostkey_check;
-        opts->auth_hostkey_check_priv = NULL;
+    free(ssh_opts.knownhosts_path);
+
+    if (!path) {
+        ssh_opts.knownhosts_path = NULL;
+        return 0;
     }
-}
 
-static void
-_nc_client_ssh_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void **priv, struct nc_client_ssh_opts *opts)
-{
-    if (auth_hostkey_check) {
-        (*auth_hostkey_check) = opts->auth_hostkey_check == sshauth_hostkey_check ? NULL : opts->auth_hostkey_check;
+    ssh_opts.knownhosts_path = strdup(path);
+    if (!ssh_opts.knownhosts_path) {
+        ERRMEM;
+        return 1;
     }
-    if (priv) {
-        (*priv) = opts->auth_hostkey_check_priv;
-    }
+
+    return 0;
 }
 
 API void
-nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void *priv)
+nc_client_ssh_set_knownhosts_mode(NC_SSH_KNOWNHOSTS_MODE mode)
 {
-    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_opts);
-}
-
-API void
-nc_client_ssh_ch_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void *priv)
-{
-    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_ch_opts);
-}
-
-API void
-nc_client_ssh_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void **priv)
-{
-    _nc_client_ssh_get_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_opts);
-}
-
-API void
-nc_client_ssh_ch_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void **priv)
-{
-    _nc_client_ssh_get_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_ch_opts);
+    ssh_opts.knownhosts_mode = mode;
 }
 
 static void
@@ -870,13 +875,7 @@ _nc_client_ssh_add_keypair(const char *pub_key, const char *priv_key, struct nc_
     FILE *key;
     char line[128];
 
-    if (!pub_key) {
-        ERRARG("pub_key");
-        return -1;
-    } else if (!priv_key) {
-        ERRARG("priv_key");
-        return -1;
-    }
+    NC_CHECK_ARG_RET(NULL, pub_key, priv_key, -1);
 
     for (i = 0; i < opts->key_count; ++i) {
         if (!strcmp(opts->keys[i].pubkey_path, pub_key) || !strcmp(opts->keys[i].privkey_path, priv_key)) {
@@ -950,7 +949,7 @@ static int
 _nc_client_ssh_del_keypair(int idx, struct nc_client_ssh_opts *opts)
 {
     if (idx >= opts->key_count) {
-        ERRARG("idx");
+        ERRARG(NULL, "idx");
         return -1;
     }
 
@@ -1009,10 +1008,10 @@ static int
 _nc_client_ssh_get_keypair(int idx, const char **pub_key, const char **priv_key, struct nc_client_ssh_opts *opts)
 {
     if (idx >= opts->key_count) {
-        ERRARG("idx");
+        ERRARG(NULL, "idx");
         return -1;
     } else if (!pub_key && !priv_key) {
-        ERRARG("pub_key and priv_key");
+        ERRARG(NULL, "pub_key and priv_key");
         return -1;
     }
 
@@ -1177,10 +1176,10 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
 
     ssh_sess = session->ti.libssh.session;
 
-    nc_gettimespec_mono_add(&ts_timeout, NC_TRANSPORT_TIMEOUT);
+    nc_timeouttime_get(&ts_timeout, NC_TRANSPORT_TIMEOUT);
     while ((ret = ssh_connect(ssh_sess)) == SSH_AGAIN) {
         usleep(NC_TIMEOUT_STEP);
-        if (nc_difftimespec_mono_cur(&ts_timeout) < 1) {
+        if (nc_timeouttime_cur_diff(&ts_timeout) < 1) {
             break;
         }
     }
@@ -1193,17 +1192,17 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
         return -1;
     }
 
-    if (opts->auth_hostkey_check(session->host, ssh_sess, opts->auth_hostkey_check_priv)) {
+    if (nc_client_ssh_auth_hostkey_check(session->host, session->port, ssh_sess)) {
         ERR(session, "Checking the host key failed.");
         return -1;
     }
 
     if (timeout > -1) {
-        nc_gettimespec_mono_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
     }
     while ((ret_auth = ssh_userauth_none(ssh_sess, NULL)) == SSH_AUTH_AGAIN) {
         usleep(NC_TIMEOUT_STEP);
-        if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+        if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
             break;
         }
     }
@@ -1272,11 +1271,11 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
             }
 
             if (timeout > -1) {
-                nc_gettimespec_mono_add(&ts_timeout, timeout);
+                nc_timeouttime_get(&ts_timeout, timeout);
             }
             while ((ret_auth = ssh_userauth_password(ssh_sess, session->username, s)) == SSH_AUTH_AGAIN) {
                 usleep(NC_TIMEOUT_STEP);
-                if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+                if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
                     break;
                 }
             }
@@ -1290,13 +1289,13 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
             VRB(session, "Keyboard-interactive authentication.");
 
             if (timeout > -1) {
-                nc_gettimespec_mono_add(&ts_timeout, timeout);
+                nc_timeouttime_get(&ts_timeout, timeout);
             }
             while (((ret_auth = ssh_userauth_kbdint(ssh_sess, NULL, NULL)) == SSH_AUTH_INFO) ||
                     (ret_auth == SSH_AUTH_AGAIN)) {
                 if (ret_auth == SSH_AUTH_AGAIN) {
                     usleep(NC_TIMEOUT_STEP);
-                    if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+                    if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
                         break;
                     }
                     continue;
@@ -1323,7 +1322,7 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
                     break;
                 }
                 if (timeout > -1) {
-                    nc_gettimespec_mono_add(&ts_timeout, timeout);
+                    nc_timeouttime_get(&ts_timeout, timeout);
                 }
             }
             break;
@@ -1354,11 +1353,11 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
                 }
 
                 if (timeout > -1) {
-                    nc_gettimespec_mono_add(&ts_timeout, timeout);
+                    nc_timeouttime_get(&ts_timeout, timeout);
                 }
                 while ((ret_auth = ssh_userauth_try_publickey(ssh_sess, NULL, pubkey)) == SSH_AUTH_AGAIN) {
                     usleep(NC_TIMEOUT_STEP);
-                    if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+                    if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
                         break;
                     }
                 }
@@ -1390,11 +1389,11 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
                 }
 
                 if (timeout > -1) {
-                    nc_gettimespec_mono_add(&ts_timeout, timeout);
+                    nc_timeouttime_get(&ts_timeout, timeout);
                 }
                 while ((ret_auth = ssh_userauth_publickey(ssh_sess, NULL, privkey)) == SSH_AUTH_AGAIN) {
                     usleep(NC_TIMEOUT_STEP);
-                    if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+                    if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
                         break;
                     }
                 }
@@ -1458,12 +1457,12 @@ open_netconf_channel(struct nc_session *session, int timeout)
 
     /* open a channel */
     if (timeout > -1) {
-        nc_gettimespec_mono_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
     }
     session->ti.libssh.channel = ssh_channel_new(ssh_sess);
     while ((ret = ssh_channel_open_session(session->ti.libssh.channel)) == SSH_AGAIN) {
         usleep(NC_TIMEOUT_STEP);
-        if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+        if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
             break;
         }
     }
@@ -1481,11 +1480,11 @@ open_netconf_channel(struct nc_session *session, int timeout)
 
     /* execute the NETCONF subsystem on the channel */
     if (timeout > -1) {
-        nc_gettimespec_mono_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
     }
     while ((ret = ssh_channel_request_subsystem(session->ti.libssh.channel, "netconf")) == SSH_AGAIN) {
         usleep(NC_TIMEOUT_STEP);
-        if ((timeout > -1) && (nc_difftimespec_mono_cur(&ts_timeout) < 1)) {
+        if ((timeout > -1) && (nc_timeouttime_cur_diff(&ts_timeout) < 1)) {
             break;
         }
     }
@@ -1516,10 +1515,7 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_keepal
     char *buf = NULL;
     size_t buf_len = 0;
 
-    if (!ssh_session) {
-        ERRARG("ssh_session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, ssh_session, NULL);
 
     /* prepare session structure */
     session = nc_new_session(NC_CLIENT, 0);
@@ -1572,7 +1568,7 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_keepal
         /* remember username */
         if (!username) {
             if (!opts->username) {
-                pw = nc_getpwuid(getuid(), &pw_buf, &buf, &buf_len);
+                pw = nc_getpw(getuid(), NULL, &pw_buf, &buf, &buf_len);
                 if (!pw) {
                     ERR(NULL, "Unknown username for the SSH connection (%s).", strerror(errno));
                     goto fail;
@@ -1646,9 +1642,10 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
     struct nc_session *session = NULL;
     char *buf = NULL;
     size_t buf_len = 0;
+    char *known_hosts_path = NULL;
 
     /* process parameters */
-    if (!host || strisempty(host)) {
+    if (!host || (host[0] == '\0')) {
         host = "localhost";
     }
 
@@ -1658,7 +1655,7 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
     port_uint = port;
 
     if (!ssh_opts.username) {
-        pw = nc_getpwuid(getuid(), &pw_buf, &buf, &buf_len);
+        pw = nc_getpw(getuid(), NULL, &pw_buf, &buf, &buf_len);
         if (!pw) {
             ERR(session, "Unknown username for the SSH connection (%s).", strerror(errno));
             goto fail;
@@ -1667,6 +1664,23 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
         }
     } else {
         username = ssh_opts.username;
+
+        pw = nc_getpw(0, username, &pw_buf, &buf, &buf_len);
+    }
+
+    if (ssh_opts.knownhosts_path) {
+        /* known_hosts file path was set so use it */
+        known_hosts_path = strdup(ssh_opts.knownhosts_path);
+        if (!known_hosts_path) {
+            ERRMEM;
+            goto fail;
+        }
+    } else if (pw) {
+        /* path not set explicitly, but current user's username found in /etc/passwd, so create the path */
+        if (asprintf(&known_hosts_path, "%s/.ssh/known_hosts", pw->pw_dir) == -1) {
+            ERRMEM;
+            goto fail;
+        }
     }
 
     /* prepare session structure */
@@ -1690,6 +1704,9 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
     ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_PORT, &port_uint);
     ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_USER, username);
     ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_TIMEOUT, &timeout);
+    if (known_hosts_path) {
+        ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_KNOWNHOSTS, known_hosts_path);
+    }
 
     /* create and assign communication socket */
     sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
@@ -1703,6 +1720,7 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
     /* store information for session connection */
     session->host = strdup(host);
     session->username = strdup(username);
+    session->port = port;
     if ((connect_ssh_session(session, &ssh_opts, NC_TRANSPORT_TIMEOUT) != 1) ||
             (open_netconf_channel(session, NC_TRANSPORT_TIMEOUT) != 1)) {
         goto fail;
@@ -1729,10 +1747,12 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
     session->port = port;
 
     free(buf);
+    free(known_hosts_path);
     return session;
 
 fail:
     free(buf);
+    free(known_hosts_path);
     free(ip_host);
     nc_session_free(session, NULL);
     return NULL;
@@ -1749,10 +1769,7 @@ nc_connect_ssh_channel(struct nc_session *session, struct ly_ctx *ctx)
 {
     struct nc_session *new_session, *ptr;
 
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     /* prepare session structure */
     new_session = nc_new_session(NC_CLIENT, 1);
@@ -1838,7 +1855,7 @@ nc_accept_callhome_ssh_sock(int sock, const char *host, uint16_t port, struct ly
     ssh_options_set(sess, SSH_OPTIONS_PORT, &uint_port);
     ssh_options_set(sess, SSH_OPTIONS_TIMEOUT, &ssh_timeout);
     if (!ssh_ch_opts.username) {
-        pw = nc_getpwuid(getuid(), &pw_buf, &buf, &buf_len);
+        pw = nc_getpw(getuid(), NULL, &pw_buf, &buf, &buf_len);
         if (!pw) {
             ERR(NULL, "Unknown username for the SSH connection (%s).", strerror(errno));
             ssh_free(sess);

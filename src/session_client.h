@@ -22,13 +22,10 @@ extern "C" {
 
 #include <libyang/libyang.h>
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 # include <libssh/libssh.h>
-#endif
-
-#ifdef NC_ENABLED_TLS
 # include <openssl/ssl.h>
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
 
 #include "messages_client.h"
 #include "netconf.h"
@@ -106,11 +103,6 @@ void nc_client_set_thread_context(void *context);
 void *nc_client_get_thread_context(void);
 
 /**
- * @brief Initialize libssh and/or libssl/libcrypto for use in the client.
- */
-void nc_client_init(void);
-
-/**
  * @brief Destroy all libssh and/or libssl/libcrypto dynamic memory and
  * the client options, for both SSH and TLS, and for Call Home too.
  */
@@ -135,9 +127,9 @@ void nc_client_destroy(void);
  *
  * @param[in] fdin Input file descriptor for reading (clear) data from NETCONF server.
  * @param[in] fdout Output file descriptor for writing (clear) data for NETCONF server.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL in case of error.
  */
 struct nc_session *nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx);
@@ -150,16 +142,16 @@ struct nc_session *nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx);
  * by sending and processing NETCONF \<hello\> messages.
  *
  * @param[in] address Path to the unix socket.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL in case of error.
  */
 struct nc_session *nc_connect_unix(const char *address, struct ly_ctx *ctx);
 
 /** @} Client Session */
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 
 /**
  * @defgroup client_ssh Client SSH
@@ -170,28 +162,23 @@ struct nc_session *nc_connect_unix(const char *address, struct ly_ctx *ctx);
  */
 
 /**
- * @brief Set SSH authentication hostkey check (knownhosts) callback.
+ * @brief Set the behaviour of checking the host key and adding/reading entries to/from the known_hosts file.
  *
- * Repetitive calling causes replacing of the previous callback and its private data. Caller is responsible for
- * freeing the private data when necessary (the private data can be obtained by
- * nc_client_ssh_get_auth_hostkey_check_clb()).
- *
- * @param[in] auth_hostkey_check Function to call, returns 0 on success, non-zero in error.
- *                               If NULL, the default callback is set.
- * @param[in] priv Optional private data to be passed to the callback function.
+ * @param[in] mode Server host key checking mode.
  */
-void nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void *priv);
+void nc_client_ssh_set_knownhosts_mode(NC_SSH_KNOWNHOSTS_MODE mode);
 
 /**
- * @brief Get currently set SSH authentication hostkey check (knownhosts) callback and its private data previously set
- * by nc_client_ssh_set_auth_hostkey_check_clb().
+ * @brief Set the path to the known_hosts file.
  *
- * @param[out] auth_hostkey_check Currently set callback, NULL in case of the default callback.
- * @param[out] priv Currently set (optional) private data to be passed to the callback function.
+ * Repetetive calling replaces the value. If the given file doesn't exist and the process has sufficient
+ * rights, it gets created whenever the file is needed, otherwise an error occurs. If NULL is passed or the
+ * path isn't set, the default known_hosts file will be used.
+ *
+ * @param[in] path Path to the known_hosts file.
+ * @return 0 on success, 1 on error.
  */
-void nc_client_ssh_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
-        void **priv);
+int nc_client_ssh_set_knownhosts_path(const char *path);
 
 /**
  * @brief Set SSH password authentication callback.
@@ -349,9 +336,9 @@ const char *nc_client_ssh_get_username(void);
  * @param[in] host Hostname or address (both Ipv4 and IPv6 are accepted) of the target server.
  * 'localhost' is used by default if NULL is specified.
  * @param[in] port Port number of the target server. Default value 830 is used if 0 is specified.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL on error.
  */
 struct nc_session *nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx);
@@ -366,9 +353,9 @@ struct nc_session *nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx
  *
  * @param[in] ssh_session libssh structure representing SSH session object. It is fully managed by the created session
  * including freeing it.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL on error.
  */
 struct nc_session *nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx);
@@ -378,18 +365,14 @@ struct nc_session *nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx
  *
  * @param[in] session Existing NETCONF session. The session has to be created on SSH transport layer using libssh -
  * it has to be created by nc_connect_ssh(), nc_connect_libssh() or nc_connect_ssh_channel().
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL on error.
  */
 struct nc_session *nc_connect_ssh_channel(struct nc_session *session, struct ly_ctx *ctx);
 
 /** @} Client SSH */
-
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
 
 /**
  * @defgroup client_tls Client TLS
@@ -464,9 +447,9 @@ void nc_client_tls_get_crl_paths(const char **crl_file, const char **crl_dir);
  * @param[in] host Hostname or address (both Ipv4 and IPv6 are accepted) of the target server.
  * 'localhost' is used by default if NULL is specified. It is verified by TLS when connecting to it.
  * @param[in] port Port number of the target server. Default value 6513 is used if 0 is specified.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL on error.
  */
 struct nc_session *nc_connect_tls(const char *host, uint16_t port, struct ly_ctx *ctx);
@@ -477,16 +460,16 @@ struct nc_session *nc_connect_tls(const char *host, uint16_t port, struct ly_ctx
  * The TLS session supplied is expected to be fully connected and authenticated!
  *
  * @param[in] tls libssl structure representing the TLS session object.
- * @param[in] ctx Optional custom context to use for the session. Disregarding whether set or not, any YANG modules
- * not present and supported by the server are attempted to be loaded using \<get-schema\> (if supported) and/or by
- * searching the searchpath (see ::nc_client_set_schema_searchpath()).
+ * @param[in,out] ctx Optional custom context to use for the session. If not set, a default context is created.
+ * Any YANG modules not present in the context and supported by the server are loaded using \<get-schema\>
+ * (if supported) and/or by searching the searchpath (see ::nc_client_set_schema_searchpath()).
  * @return Created NETCONF session object or NULL on error.
  */
 struct nc_session *nc_connect_libssl(SSL *tls, struct ly_ctx *ctx);
 
 /** @} Client TLS */
 
-#endif /* NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 
 /**
  * @addtogroup client_session

@@ -42,21 +42,23 @@
 #include <libyang/libyang.h>
 
 #include "compat.h"
-#include "libnetconf.h"
-#include "messages_client.h"
+#include "config.h"
+#include "log_p.h"
+#include "messages_p.h"
 #include "session_client.h"
+#include "session_client_ch.h"
+#include "session_p.h"
 
 #include "../modules/ietf_netconf@2013-09-29_yang.h"
 #include "../modules/ietf_netconf_monitoring@2010-10-04_yang.h"
 
 static const char *ncds2str[] = {NULL, "config", "url", "running", "startup", "candidate"};
 
-#ifdef NC_ENABLED_SSH
-int sshauth_hostkey_check(const char *hostname, ssh_session session, void *priv);
+#ifdef NC_ENABLED_SSH_TLS
 char *sshauth_password(const char *username, const char *hostname, void *priv);
 char *sshauth_interactive(const char *auth_name, const char *instruction, const char *prompt, int echo, void *priv);
 char *sshauth_privkey_passphrase(const char *privkey_path, void *priv);
-#endif /* NC_ENABLED_SSH */
+#endif /* NC_ENABLED_SSH_TLS */
 
 static pthread_once_t nc_client_context_once = PTHREAD_ONCE_INIT;
 static pthread_key_t nc_client_context_key;
@@ -68,22 +70,20 @@ static struct nc_client_context context_main = {
         .max_probes = 10,
         .probe_interval = 5
     },
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
     .ssh_opts = {
         .auth_pref = {{NC_SSH_AUTH_INTERACTIVE, 1}, {NC_SSH_AUTH_PASSWORD, 2}, {NC_SSH_AUTH_PUBLICKEY, 3}},
-        .auth_hostkey_check = sshauth_hostkey_check,
         .auth_password = sshauth_password,
         .auth_interactive = sshauth_interactive,
         .auth_privkey_passphrase = sshauth_privkey_passphrase
     },
     .ssh_ch_opts = {
         .auth_pref = {{NC_SSH_AUTH_INTERACTIVE, 1}, {NC_SSH_AUTH_PASSWORD, 2}, {NC_SSH_AUTH_PUBLICKEY, 3}},
-        .auth_hostkey_check = sshauth_hostkey_check,
         .auth_password = sshauth_password,
         .auth_interactive = sshauth_interactive,
         .auth_privkey_passphrase = sshauth_privkey_passphrase
     },
-#endif /* NC_ENABLED_SSH */
+#endif /* NC_ENABLED_SSH_TLS */
     /* .tls_ structures zeroed */
     .refcount = 0
 };
@@ -110,7 +110,7 @@ nc_client_context_free(void *ptr)
         /* for the main thread the same is done in nc_client_destroy() */
         free(c->opts.schema_searchpath);
 
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
+#ifdef NC_ENABLED_SSH_TLS
         int i;
 
         for (i = 0; i < c->opts.ch_bind_count; ++i) {
@@ -120,15 +120,13 @@ nc_client_context_free(void *ptr)
         free(c->opts.ch_binds);
         c->opts.ch_binds = NULL;
         c->opts.ch_bind_count = 0;
-#endif
-#ifdef NC_ENABLED_SSH
+
         _nc_client_ssh_destroy_opts(&c->ssh_opts);
         _nc_client_ssh_destroy_opts(&c->ssh_ch_opts);
-#endif
-#ifdef NC_ENABLED_TLS
+
         _nc_client_tls_destroy_opts(&c->tls_opts);
         _nc_client_tls_destroy_opts(&c->tls_ch_opts);
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
         free(c);
     }
 }
@@ -162,14 +160,13 @@ nc_client_context_location(void)
             e = calloc(1, sizeof *e);
             /* set default values */
             e->refcount = 1;
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
             e->ssh_opts.auth_pref[0].type = NC_SSH_AUTH_INTERACTIVE;
             e->ssh_opts.auth_pref[0].value = 1;
             e->ssh_opts.auth_pref[1].type = NC_SSH_AUTH_PASSWORD;
             e->ssh_opts.auth_pref[1].value = 2;
             e->ssh_opts.auth_pref[2].type = NC_SSH_AUTH_PUBLICKEY;
             e->ssh_opts.auth_pref[2].value = 3;
-            e->ssh_opts.auth_hostkey_check = sshauth_hostkey_check;
             e->ssh_opts.auth_password = sshauth_password;
             e->ssh_opts.auth_interactive = sshauth_interactive;
             e->ssh_opts.auth_privkey_passphrase = sshauth_privkey_passphrase;
@@ -179,7 +176,7 @@ nc_client_context_location(void)
             e->ssh_ch_opts.auth_pref[0].value = 1;
             e->ssh_ch_opts.auth_pref[1].value = 2;
             e->ssh_ch_opts.auth_pref[2].value = 3;
-#endif /* NC_ENABLED_SSH */
+#endif /* NC_ENABLED_SSH_TLS */
         }
         pthread_setspecific(nc_client_context_key, e);
     }
@@ -201,7 +198,7 @@ nc_client_set_thread_context(void *context)
     struct nc_client_context *old, *new;
 
     if (!context) {
-        ERRARG(context);
+        ERRARG(NULL, "context");
         return;
     }
 
@@ -1377,10 +1374,10 @@ nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx)
     struct nc_session *session;
 
     if (fdin < 0) {
-        ERRARG("fdin");
+        ERRARG(NULL, "fdin");
         return NULL;
     } else if (fdout < 0) {
-        ERRARG("fdout");
+        ERRARG(NULL, "fdout");
         return NULL;
     }
 
@@ -1430,10 +1427,7 @@ nc_connect_unix(const char *address, struct ly_ctx *ctx)
     char *buf = NULL;
     size_t buf_size = 0;
 
-    if (address == NULL) {
-        ERRARG("address");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, address, NULL);
 
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -1475,7 +1469,7 @@ nc_connect_unix(const char *address, struct ly_ctx *ctx)
 
     session->path = strdup(address);
 
-    pw = nc_getpwuid(geteuid(), &pw_buf, &buf, &buf_size);
+    pw = nc_getpw(geteuid(), NULL, &pw_buf, &buf, &buf_size);
     if (!pw) {
         ERR(NULL, "Failed to find username for UID %u.", (unsigned int)geteuid());
         goto fail;
@@ -1509,6 +1503,50 @@ fail:
 }
 
 /**
+ * @brief Convert socket IP address to string.
+ *
+ * @param[in] saddr Sockaddr to convert.
+ * @param[out] str_ip String IP address.
+ * @param[out] port Optional port.
+ * @return 0 on success.
+ * @return -1 on error.
+ */
+static int
+nc_saddr2str(const struct sockaddr *saddr, char **str_ip, uint16_t *port)
+{
+    void *addr;
+    socklen_t str_len;
+
+    assert((saddr->sa_family == AF_INET) || (saddr->sa_family == AF_INET6));
+
+    str_len = (saddr->sa_family == AF_INET) ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN;
+    *str_ip = malloc(str_len);
+    if (!*str_ip) {
+        ERRMEM;
+        return -1;
+    }
+
+    if (saddr->sa_family == AF_INET) {
+        addr = &((struct sockaddr_in *)saddr)->sin_addr;
+        if (port) {
+            *port = ntohs(((struct sockaddr_in *)saddr)->sin_port);
+        }
+    } else {
+        addr = &((struct sockaddr_in6 *)saddr)->sin6_addr;
+        if (port) {
+            *port = ntohs(((struct sockaddr_in6 *)saddr)->sin6_port);
+        }
+    }
+    if (!inet_ntop(saddr->sa_family, addr, *str_ip, str_len)) {
+        ERR(NULL, "Converting host to IP address failed (%s).", strerror(errno));
+        free(*str_ip);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
  * @brief Try to connect a socket, optionally a pending one from a previous attempt.
  *
  * @param[in] timeout_ms Timeout in ms to wait for the connection to be fully established, -1 to block.
@@ -1526,27 +1564,19 @@ sock_connect(int timeout_ms, int *sock_pending, struct addrinfo *res, struct nc_
     fd_set wset;
     struct timeval ts;
     socklen_t len = sizeof(int);
-    struct in_addr *addr;
     uint16_t port;
-    char str[INET6_ADDRSTRLEN];
+    char *str;
 
     if (sock_pending && (*sock_pending != -1)) {
         VRB(NULL, "Trying to connect the pending socket %d.", *sock_pending);
         sock = *sock_pending;
     } else {
         assert(res);
-        if (res->ai_family == AF_INET6) {
-            addr = (struct in_addr *) &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr;
-            port = ntohs(((struct sockaddr_in6 *)res->ai_addr)->sin6_port);
-        } else {
-            addr = &((struct sockaddr_in *)res->ai_addr)->sin_addr;
-            port = ntohs(((struct sockaddr_in *)res->ai_addr)->sin_port);
+        if (nc_saddr2str(res->ai_addr, &str, &port)) {
+            return -1;
         }
-        if (!inet_ntop(res->ai_family, addr, str, res->ai_addrlen)) {
-            WRN(NULL, "inet_ntop() failed (%s).", strerror(errno));
-        } else {
-            VRB(NULL, "Trying to connect via %s to %s:%u.", (res->ai_family == AF_INET6) ? "IPv6" : "IPv4", str, port);
-        }
+        VRB(NULL, "Trying to connect via %s to %s:%u.", (res->ai_family == AF_INET6) ? "IPv6" : "IPv4", str, port);
+        free(str);
 
         /* connect to a server */
         sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -1632,8 +1662,11 @@ nc_sock_connect(const char *host, uint16_t port, int timeout_ms, struct nc_keepa
     int i, opt;
     int sock = sock_pending ? *sock_pending : -1;
     struct addrinfo hints, *res_list = NULL, *res;
-    char *buf, port_s[6]; /* length of string representation of short int */
-    void *addr;
+    char port_s[6]; /* length of string representation of short int */
+    struct sockaddr_storage saddr;
+    socklen_t addr_len = sizeof saddr;
+
+    *ip_host = NULL;
 
     DBG(NULL, "nc_sock_connect(%s, %u, %d, %d)", host, port, timeout_ms, sock);
 
@@ -1670,24 +1703,8 @@ nc_sock_connect(const char *host, uint16_t port, int timeout_ms, struct nc_keepa
                 goto error;
             }
 
-            if (ip_host && ((res->ai_family == AF_INET6) || (res->ai_family == AF_INET))) {
-                buf = malloc(INET6_ADDRSTRLEN);
-                if (!buf) {
-                    ERRMEM;
-                    goto error;
-                }
-                if (res->ai_family == AF_INET) {
-                    addr = &((struct sockaddr_in *)res->ai_addr)->sin_addr;
-                } else {
-                    addr = &((struct sockaddr_in6 *)res->ai_addr)->sin6_addr;
-                }
-                if (!inet_ntop(res->ai_family, addr, buf, INET6_ADDRSTRLEN)) {
-                    ERR(NULL, "Converting host to IP address failed (%s).", strerror(errno));
-                    free(buf);
-                    goto error;
-                }
-
-                *ip_host = buf;
+            if (nc_saddr2str(res->ai_addr, ip_host, NULL)) {
+                goto error;
             }
             break;
         }
@@ -1697,6 +1714,17 @@ nc_sock_connect(const char *host, uint16_t port, int timeout_ms, struct nc_keepa
         /* try to get a connection with the pending socket */
         assert(sock_pending);
         sock = sock_connect(timeout_ms, sock_pending, NULL, ka);
+
+        if (sock > 0) {
+            if (getsockname(sock, (struct sockaddr *)&saddr, &addr_len)) {
+                ERR(NULL, "getsockname failed (%s).", strerror(errno));
+                goto error;
+            }
+
+            if (nc_saddr2str((struct sockaddr *)&saddr, ip_host, NULL)) {
+                goto error;
+            }
+        }
     }
 
     return sock;
@@ -1714,20 +1742,14 @@ error:
     return -1;
 }
 
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
+#ifdef NC_ENABLED_SSH_TLS
 
 int
 nc_client_ch_add_bind_listen(const char *address, uint16_t port, const char *hostname, NC_TRANSPORT_IMPL ti)
 {
     int sock;
 
-    if (!address) {
-        ERRARG("address");
-        return -1;
-    } else if (!port) {
-        ERRARG("port");
-        return -1;
-    }
+    NC_CHECK_ARG_RET(NULL, address, port, -1);
 
     sock = nc_sock_listen_inet(address, port, &client_opts.ka);
     if (sock == -1) {
@@ -1819,11 +1841,10 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
     char *host = NULL;
     uint16_t port, idx;
 
+    NC_CHECK_ARG_RET(NULL, session, -1);
+
     if (!client_opts.ch_binds) {
         ERRINIT;
-        return -1;
-    } else if (!session) {
-        ERRARG("session");
         return -1;
     }
 
@@ -1833,18 +1854,12 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
         return sock;
     }
 
-#ifdef NC_ENABLED_SSH
     if (client_opts.ch_binds_aux[idx].ti == NC_TI_LIBSSH) {
         *session = nc_accept_callhome_ssh_sock(sock, host, port, ctx, NC_TRANSPORT_TIMEOUT);
-    } else
-#endif
-#ifdef NC_ENABLED_TLS
-    if (client_opts.ch_binds_aux[idx].ti == NC_TI_OPENSSL) {
+    } else if (client_opts.ch_binds_aux[idx].ti == NC_TI_OPENSSL) {
         *session = nc_accept_callhome_tls_sock(sock, host, port, ctx, NC_TRANSPORT_TIMEOUT,
                 client_opts.ch_binds_aux[idx].hostname);
-    } else
-#endif
-    {
+    } else {
         close(sock);
         *session = NULL;
     }
@@ -1858,15 +1873,12 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
     return 1;
 }
 
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 
 API const char * const *
 nc_session_get_cpblts(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     return (const char * const *)session->opts.client.cpblts;
 }
@@ -1876,13 +1888,7 @@ nc_session_cpblt(const struct nc_session *session, const char *capab)
 {
     int i, len;
 
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    } else if (!capab) {
-        ERRARG("capab");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, capab, NULL);
 
     len = strlen(capab);
     for (i = 0; session->opts.client.cpblts[i]; ++i) {
@@ -1897,8 +1903,10 @@ nc_session_cpblt(const struct nc_session *session, const char *capab)
 API int
 nc_session_ntf_thread_running(const struct nc_session *session)
 {
-    if (!session || (session->side != NC_CLIENT)) {
-        ERRARG("session");
+    NC_CHECK_ARG_RET(session, session, 0);
+
+    if (session->side != NC_CLIENT) {
+        ERRARG(NULL, "session");
         return 0;
     }
 
@@ -1906,25 +1914,14 @@ nc_session_ntf_thread_running(const struct nc_session *session)
 }
 
 API void
-nc_client_init(void)
-{
-    nc_init();
-}
-
-API void
 nc_client_destroy(void)
 {
     nc_client_set_schema_searchpath(NULL);
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
+#ifdef NC_ENABLED_SSH_TLS
     nc_client_ch_del_bind(NULL, 0, 0);
-#endif
-#ifdef NC_ENABLED_SSH
     nc_client_ssh_destroy_opts();
-#endif
-#ifdef NC_ENABLED_TLS
     nc_client_tls_destroy_opts();
-#endif
-    nc_destroy();
+#endif /* NC_ENABLED_SSH_TLS */
 }
 
 static NC_MSG_TYPE
@@ -2320,19 +2317,9 @@ nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, in
 {
     NC_MSG_TYPE ret;
 
-    if (!session) {
-        ERRARG("session");
-        return NC_MSG_ERROR;
-    } else if (!rpc) {
-        ERRARG("rpc");
-        return NC_MSG_ERROR;
-    } else if (!envp) {
-        ERRARG("envp");
-        return NC_MSG_ERROR;
-    } else if (!op) {
-        ERRARG("op");
-        return NC_MSG_ERROR;
-    } else if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
+    NC_CHECK_ARG_RET(session, session, rpc, envp, op, NC_MSG_ERROR);
+
+    if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
         ERR(session, "Invalid session to receive RPC replies.");
         return NC_MSG_ERROR;
     }
@@ -2389,16 +2376,9 @@ cleanup:
 API NC_MSG_TYPE
 nc_recv_notif(struct nc_session *session, int timeout, struct lyd_node **envp, struct lyd_node **op)
 {
-    if (!session) {
-        ERRARG("session");
-        return NC_MSG_ERROR;
-    } else if (!envp) {
-        ERRARG("envp");
-        return NC_MSG_ERROR;
-    } else if (!op) {
-        ERRARG("op");
-        return NC_MSG_ERROR;
-    } else if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
+    NC_CHECK_ARG_RET(session, session, envp, op, NC_MSG_ERROR);
+
+    if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
         ERR(session, "Invalid session to receive Notifications.");
         return NC_MSG_ERROR;
     }
@@ -2471,13 +2451,9 @@ nc_recv_notif_dispatch_data(struct nc_session *session, nc_notif_dispatch_clb no
     pthread_t tid;
     int ret;
 
-    if (!session) {
-        ERRARG("session");
-        return -1;
-    } else if (!notif_clb) {
-        ERRARG("notif_clb");
-        return -1;
-    } else if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
+    NC_CHECK_ARG_RET(session, session, notif_clb, -1);
+
+    if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
         ERR(session, "Invalid session to receive Notifications.");
         return -1;
     }
@@ -2563,16 +2539,9 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
     char str[11];
     uint64_t cur_msgid;
 
-    if (!session) {
-        ERRARG("session");
-        return NC_MSG_ERROR;
-    } else if (!rpc) {
-        ERRARG("rpc");
-        return NC_MSG_ERROR;
-    } else if (!msgid) {
-        ERRARG("msgid");
-        return NC_MSG_ERROR;
-    } else if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
+    NC_CHECK_ARG_RET(session, session, rpc, msgid, NC_MSG_ERROR);
+
+    if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
         ERR(session, "Invalid session to send RPCs.");
         return NC_MSG_ERROR;
     }
@@ -3155,7 +3124,7 @@ API void
 nc_client_session_set_not_strict(struct nc_session *session)
 {
     if (session->side != NC_CLIENT) {
-        ERRARG("session");
+        ERRARG(NULL, "session");
         return;
     }
 

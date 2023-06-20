@@ -7,15 +7,15 @@ if(${SOURCE_FORMAT_ENABLED})
     add_test(NAME format WORKING_DIRECTORY ${CMAKE_BINARY_DIR} COMMAND cmake --build ${CMAKE_BINARY_DIR} --target format-check)
 endif()
 
-# list of all the tests in each directory
-set(tests test_nc3)
+# list of all the tests that don't require SSH and TLS
+set(tests test_unix_socket)
 
 # only enable PAM tests if the version of PAM is greater than 1.4
 if(LIBPAM_HAVE_CONFDIR)
-    list(APPEND tests test_auth test_two_channels)
+    list(APPEND tests test_auth)
 endif()
 
-set(client_tests test_client test_client_messages)
+# set(client_tests test_client test_client_messages)
 
 # add -Wl,--wrap flags
 set(test test_client_ssh)
@@ -36,21 +36,15 @@ foreach(mock_func IN LISTS ${test}_mock_funcs)
 endforeach()
 
 #append tests depending on SSH/TLS
-if(ENABLE_SSH OR ENABLE_TLS)
-    #list(APPEND tests test_server_thread)
-    if(ENABLE_SSH)
-        list(APPEND client_tests test_client_ssh)
-    endif()
-
-    if(ENABLE_TLS)
-        list(APPEND client_tests test_client_tls)
-    endif()
+if(ENABLE_SSH_TLS)
+    list(APPEND tests test_two_channels test_keystore test_config_new test_truststore test_ec
+        test_ed25519 test_replace test_endpt_share_clients test_tls test_crl test_ch)
 endif()
 
 foreach(src IN LISTS libsrc)
     list(APPEND test_srcs "../${src}")
 endforeach()
-add_library(testobj OBJECT ${test_srcs})
+add_library(testobj OBJECT ${test_srcs} ${compatsrc})
 
 foreach(test_name IN LISTS tests)
     add_executable(${test_name} $<TARGET_OBJECTS:testobj> ${test_name}.c)
@@ -60,13 +54,13 @@ foreach(test_name IN LISTS tests)
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
 endforeach()
 
-foreach(test_name IN LISTS client_tests)
-    add_executable(${test_name} $<TARGET_OBJECTS:testobj> ./client/${test_name}.c)
-    target_link_libraries(${test_name} ${CMOCKA_LIBRARIES} ${LIBYANG_LIBRARIES} netconf2)
-    target_include_directories(${test_name} PRIVATE ${CMOCKA_INCLUDE_DIR})
-    set_target_properties(${test_name} PROPERTIES LINK_FLAGS "${${test_name}_wrap_link_flags}")
-    add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
-endforeach()
+# foreach(test_name IN LISTS client_tests)
+#     add_executable(${test_name} $<TARGET_OBJECTS:testobj> ./client/${test_name}.c)
+#     target_link_libraries(${test_name} ${CMOCKA_LIBRARIES} ${LIBYANG_LIBRARIES} netconf2)
+#     target_include_directories(${test_name} PRIVATE ${CMOCKA_INCLUDE_DIR})
+#     set_target_properties(${test_name} PROPERTIES LINK_FLAGS "${${test_name}_wrap_link_flags}")
+#     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
+# endforeach()
 
 if(ENABLE_VALGRIND_TESTS)
     foreach(test_name IN LISTS tests)
@@ -74,10 +68,10 @@ if(ENABLE_VALGRIND_TESTS)
             --suppressions=${PROJECT_SOURCE_DIR}/tests/library_valgrind.supp ${CMAKE_BINARY_DIR}/tests/${test_name})
     endforeach()
 
-    foreach(test_name IN LISTS client_tests)
-        add_test(${test_name}_valgrind valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1
-            --suppressions=${PROJECT_SOURCE_DIR}/tests/library_valgrind.supp ${CMAKE_BINARY_DIR}/tests/${test_name})
-    endforeach()
+    # foreach(test_name IN LISTS client_tests)
+    #     add_test(${test_name}_valgrind valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1
+    #         --suppressions=${PROJECT_SOURCE_DIR}/tests/library_valgrind.supp ${CMAKE_BINARY_DIR}/tests/${test_name})
+    # endforeach()
 endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/src ${PROJECT_BINARY_DIR})

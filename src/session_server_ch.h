@@ -22,11 +22,12 @@ extern "C" {
 
 #include <libyang/libyang.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "netconf.h"
 #include "session.h"
 
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
+#ifdef NC_ENABLED_SSH_TLS
 
 /**
  * @defgroup server_ch Server-side Call Home
@@ -216,7 +217,7 @@ typedef void (*nc_server_ch_session_release_ctx_cb)(void *cb_data);
  * @return 0 on success;
  * @return non-zero on error and @p new_session is freed.
  */
-typedef int (*nc_server_ch_new_session_cb)(const char *client_name, struct nc_session *new_session);
+typedef int (*nc_server_ch_new_session_cb)(const char *client_name, struct nc_session *new_session, void *user_data);
 
 /**
  * @brief Dispatch a thread connecting to a listening NETCONF client and creating Call Home sessions.
@@ -229,13 +230,10 @@ typedef int (*nc_server_ch_new_session_cb)(const char *client_name, struct nc_se
  * @return 0 if the thread was successfully created, -1 on error.
  */
 int nc_connect_ch_client_dispatch(const char *client_name, nc_server_ch_session_acquire_ctx_cb acquire_ctx_cb,
-        nc_server_ch_session_release_ctx_cb release_ctx_cb, void *ctx_cb_data, nc_server_ch_new_session_cb new_session_cb);
+        nc_server_ch_session_release_ctx_cb release_ctx_cb, void *ctx_cb_data, nc_server_ch_new_session_cb new_session_cb,
+        void *new_session_cb_data);
 
 /** @} Server-side Call Home */
-
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
-
-#ifdef NC_ENABLED_SSH
 
 /**
  * @defgroup server_ch_ssh Server-side Call Home on SSH
@@ -321,10 +319,6 @@ int nc_server_ssh_ch_client_endpt_set_auth_attempts(const char *client_name, con
 int nc_server_ssh_ch_client_endpt_set_auth_timeout(const char *client_name, const char *endpt_name, uint16_t auth_timeout);
 
 /** @} Server-side Call Home on SSH */
-
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
 
 /**
  * @defgroup server_ch_tls Server-side Call Home on TLS
@@ -456,7 +450,7 @@ int nc_server_tls_ch_client_endpt_get_ctn(const char *client_name, const char *e
 
 /** @} Server-side Call Home on TLS */
 
-#endif /* NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 
 #ifdef __cplusplus
 }

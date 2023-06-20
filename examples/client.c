@@ -149,8 +149,6 @@ main(int argc, char **argv)
         goto cleanup;
     }
 
-    nc_client_init();
-
     /* set the path to search for schemas */
     nc_client_set_schema_searchpath(MODULES_DIR);
 
@@ -196,7 +194,7 @@ main(int argc, char **argv)
         break;
 
     case SSH:
-        session = nc_connect_ssh(SSH_ADDRESS, SSH_PORT, NULL);
+        session = nc_connect_ssh(SSH_ADDRESS, atoi(SSH_PORT), NULL);
         break;
 
     case NONE:

@@ -7,7 +7,250 @@ module libnetconf2-netconf-server {
     prefix ncs;
   }
 
+  import ietf-crypto-types {
+    prefix ct;
+  }
+
+  import iana-ssh-public-key-algs {
+    prefix sshpka;
+  }
+
+  import iana-ssh-key-exchange-algs {
+    prefix sshkea;
+  }
+
+  import iana-ssh-encryption-algs {
+    prefix sshea;
+  }
+
+  import iana-ssh-mac-algs {
+    prefix sshma;
+  }
+
+  import ietf-tls-server {
+    prefix tlss;
+  }
+
+  /*
+  identity ed25519-private-key-format {
+    base ct:private-key-format;
+    description
+      "This identity would indicate that the
+       private key is encoded in a ED25519PrivateKey
+       format. However no such format is currently
+       standardized or even exists.
+
+       If you wish to use a private key that uses
+       an ED25519 algorithm, you need to pick either
+       the private-key-info-format or
+       openssh-private-key-format identity.";
+  }
+*/
+
+  identity private-key-info-format {
+    base ct:private-key-format;
+    description
+      "Indicates that the private key is encoded
+       as a PrivateKeyInfo structure (from RFC 5208).
+
+       The expected header of the private key:
+       -----BEGIN PRIVATE KEY-----
+       The expected footer of the private key:
+       -----END PRIVATE KEY-----
+
+       Supported private key algorithms to use with
+       this format are: RSA, EC and ED25519.
+
+       Commonly used public key format for this
+       type of private key is represented by the
+       SubjectPublicKeyInfo identity.";
+
+    reference
+      "RFC 5208: PKCS #8: Private-Key Information
+                 Syntax Specification Version 1.2";
+  }
+
+  identity openssh-private-key-format {
+    base ct:private-key-format;
+    description
+      "Indicates that the private key is encoded
+       in the OpenSSH format.
+
+       The expected header of the private key:
+       -----BEGIN OPENSSH PRIVATE KEY-----
+       The expected footer of the private key:
+       -----END OPENSSH PRIVATE KEY-----
+
+       Supported private key algorithms to use with
+       this format are: RSA, EC and ED25519.
+
+       Commonly used public key format for this
+       type of private key is either the
+       SSH2 public key format (from RFC 4716)
+       or the Public key format defined in RFC 4253,
+       Section 6.6.";
+
+    reference
+      "The OpenSSH Private Key Format:
+        https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.key
+
+       RFC 4716:
+        The Secure Shell (SSH) Public Key File Format
+
+       RFC 4253:
+        The Secure Shell (SSH) Transport Layer Protocol";
+  }
+
+  identity openssh-ssh-ed25519-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "SSH-ED25519-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-ecdsa-sha2-nistp521-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "ECDSA-SHA2-NISTP521-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-ecdsa-sha2-nistp384-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "ECDSA-SHA2-NISTP384-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-ecdsa-sha2-nistp256-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "ECDSA-SHA2-NISTP256-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-rsa-sha2-512-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "RSA-SHA2-512-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-rsa-sha2-256-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "RSA-SHA2-256-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-ssh-rsa-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "SSH-RSA-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity openssh-ssh-dss-cert-v01 {
+    base sshpka:public-key-alg-base;
+    description
+      "SSH-DSS-CERT-V01@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.certkeys:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.certkeys?annotate=HEAD";
+  }
+
+  identity libssh-curve25519-sha256 {
+    base sshkea:key-exchange-alg-base;
+    description
+      "CURVE25519-SHA256@LIBSSH.ORG";
+    reference
+      "curve25519-sha256@libssh.org specification:
+        https://git.libssh.org/projects/libssh.git/tree/doc/curve25519-sha256@libssh.org.txt";
+  }
+
+  identity openssh-chacha20-poly1305 {
+    base sshea:encryption-alg-base;
+    description
+      "CHACHA20-POLY1305@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL.chacha20poly1305:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL.chacha20poly1305?annotate=HEAD";
+  }
+
+  identity openssh-aes256-gcm {
+    base sshea:encryption-alg-base;
+    description
+      "AES256-GCM@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL, Section 1.6:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL?annotate=HEAD";
+  }
+
+  identity openssh-aes128-gcm {
+    base sshea:encryption-alg-base;
+    description
+      "AES128-GCM@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL, Section 1.6:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL?annotate=HEAD";
+  }
+
+  identity openssh-hmac-sha2-256-etm {
+    base sshma:mac-alg-base;
+    description
+      "HMAC-SHA2-256-ETM@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL?annotate=HEAD";
+  }
+
+  identity openssh-hmac-sha2-512-etm {
+    base sshma:mac-alg-base;
+    description
+      "HMAC-SHA2-512-ETM@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL?annotate=HEAD";
+  }
+
+  identity openssh-hmac-sha1-etm {
+    base sshma:mac-alg-base;
+    description
+      "HMAC-SHA1-ETM@OPENSSH.COM";
+    reference
+      "OpenSSH PROTOCOL:
+        https://cvsweb.openbsd.org/src/usr.bin/ssh/PROTOCOL?annotate=HEAD";
+  }
+
   augment "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:transport/ncs:ssh/ncs:ssh/ncs:ssh-server-parameters/ncs:client-authentication" {
+    leaf auth-attempts {
+      type uint16;
+      default 3;
+    }
+
+    leaf auth-timeout {
+      type uint16;
+      default 10;
+      units "seconds";
+    }
+  }
+
+  // CH auth-attempts and auth-timeout
+  augment "/ncs:netconf-server/ncs:call-home/ncs:netconf-client/ncs:endpoints/ncs:endpoint/ncs:transport/ncs:ssh/ncs:ssh/ncs:ssh-server-parameters/ncs:client-authentication" {
     leaf auth-attempts {
       type uint16;
       default 3;
@@ -29,6 +272,100 @@ module libnetconf2-netconf-server {
       }
       leaf pam-config-file-dir {
         type string;
+      }
+    }
+  }
+
+  augment "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:transport" {
+    case unix-socket {
+      container unix-socket {
+        leaf path {
+          type string;
+          mandatory true;
+        }
+        leaf mode {
+          type uint16;
+        }
+        leaf uid {
+          type uint16;
+        }
+        leaf gid {
+          type uint16;
+        }
+      }
+    }
+  }
+
+  augment "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:transport/ncs:ssh/ncs:ssh/ncs:ssh-server-parameters/ncs:client-authentication" {
+    description
+      "Reference to another SSH endpoint's client-authentication container.
+       All the users set in the referencing endpoint will be tried first and if and only if
+       there is no match, the referenced endpoint's users will be tried. The references can be
+       multiple, however there must not be a cycle.";
+
+    leaf endpoint-client-auth {
+      type leafref {
+        path "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:name";
+      }
+
+      must "deref(.)/../*[local-name() = 'ssh']";
+    }
+  }
+
+  augment "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:transport/ncs:tls/ncs:tls/ncs:tls-server-parameters/ncs:client-authentication" {
+    description
+      "Reference to another TLS endpoint's client-authentication container.
+       All the users set in the referencing endpoint will be tried first and if and only if
+       there is no match, the referenced endpoint's users will be tried. The references can be
+       multiple, however there must not be a cycle.";
+
+    leaf endpoint-client-auth {
+      type leafref {
+        path "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:name";
+      }
+
+      must "deref(.)/../*[local-name() = 'tls']";
+    }
+  }
+
+  augment "/ncs:netconf-server/ncs:listen/ncs:endpoint/ncs:transport/ncs:tls/ncs:tls/ncs:tls-server-parameters/ncs:client-authentication" {
+    description
+      "Indicates that the TLS server is using a Certificate Revocation List
+       to authenticate clients or to deny access for certain certificates.
+       The given Certificate Revocation List must be PEM or DER encoded.";
+
+    reference
+      "RFC 5280:
+         Internet X.509 Public Key Infrastructure Certificate
+         and Certificate Revocation List (CRL) Profile";
+
+    choice certificate-revocation-list {
+      leaf crl-url {
+        type string;
+        description
+          "An URL from which the Certificate Revocation List will be
+           downloaded and used. The HTTP protocol works, but other
+           protocols, such as FTP, may work as well.";
+      }
+
+      leaf crl-path {
+        type string;
+        description
+          "A path to a Certificate Revocation List file.";
+      }
+
+      leaf crl-cert-ext {
+        type empty;
+        description
+          "Indicates that the Certificate Revocation List
+           Distribution Points extension will be used to fetch
+           Certificate Revocation Lists from. This will be done
+           for all the configured Certificate Authority certificates.";
+
+        reference
+          "RFC 5280:
+             Internet X.509 Public Key Infrastructure Certificate
+             and Certificate Revocation List (CRL) Profile, Section 4.2.1.13";
       }
     }
   }

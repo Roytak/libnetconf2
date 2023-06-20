@@ -4,7 +4,7 @@
  * @brief libnetconf2 - general session functions
  *
  * @copyright
- * Copyright (c) 2015 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2015 - 2023 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -18,8 +18,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <libyang/libyang.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,22 +28,18 @@
 #include <unistd.h>
 
 #include "compat.h"
-#include "libnetconf.h"
-#include "session.h"
-#include "session_server.h"
+#include "config.h"
+#include "log_p.h"
+#include "netconf.h"
+#include "session_p.h"
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 
-#   include <libssh/libssh.h>
+#include <libssh/libssh.h>
+#include <openssl/conf.h>
+#include <openssl/err.h>
 
-#endif /* NC_ENABLED_SSH */
-
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
-
-#   include <openssl/conf.h>
-#   include <openssl/err.h>
-
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 
 /* in seconds */
 #define NC_CLIENT_HELLO_TIMEOUT 60
@@ -56,130 +50,77 @@
 
 extern struct nc_server_opts server_opts;
 
-int
-nc_gettimespec_real_add(struct timespec *ts, uint32_t msec)
+void
+nc_timeouttime_get(struct timespec *ts, uint32_t add_ms)
 {
-#ifdef CLOCK_REALTIME
+    if (clock_gettime(COMPAT_CLOCK_ID, ts) == -1) {
+        ERR(NULL, "clock_gettime() failed (%s).", strerror(errno));
+        return;
+    }
+
+    if (!add_ms) {
+        return;
+    }
+
+    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
+
+    ts->tv_sec += add_ms / 1000;
+    ts->tv_nsec += (add_ms % 1000) * 1000000L;
+
+    if (ts->tv_nsec >= 1000000000L) {
+        ++ts->tv_sec;
+        ts->tv_nsec -= 1000000000L;
+    } else if (ts->tv_nsec < 0) {
+        --ts->tv_sec;
+        ts->tv_nsec += 1000000000L;
+    }
+
+    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
+}
+
+int32_t
+nc_timeouttime_cur_diff(const struct timespec *ts)
+{
+    struct timespec cur;
+    int64_t nsec_diff = 0;
+
+    nc_timeouttime_get(&cur, 0);
+
+    nsec_diff += (((int64_t)ts->tv_sec) - ((int64_t)cur.tv_sec)) * 1000000000L;
+    nsec_diff += ((int64_t)ts->tv_nsec) - ((int64_t)cur.tv_nsec);
+
+    return nsec_diff / 1000000L;
+}
+
+void
+nc_realtime_get(struct timespec *ts)
+{
     if (clock_gettime(CLOCK_REALTIME, ts)) {
-        return -1;
+        ERR(NULL, "clock_gettime() failed (%s).", strerror(errno));
+        return;
     }
-#else
-    int rc;
-    struct timeval tv;
-
-    rc = gettimeofday(&tv, NULL);
-    if (rc) {
-        return -1;
-    } else {
-        ts->tv_sec = (time_t)tv.tv_sec;
-        ts->tv_nsec = 1000L * (long)tv.tv_usec;
-    }
-#endif
-
-    if (!msec) {
-        return 0;
-    }
-
-    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
-
-    ts->tv_sec += msec / 1000;
-    ts->tv_nsec += (msec % 1000) * 1000000L;
-
-    if (ts->tv_nsec >= 1000000000L) {
-        ++ts->tv_sec;
-        ts->tv_nsec -= 1000000000L;
-    } else if (ts->tv_nsec < 0) {
-        --ts->tv_sec;
-        ts->tv_nsec += 1000000000L;
-    }
-
-    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
-    return 0;
 }
 
-int
-nc_gettimespec_mono_add(struct timespec *ts, uint32_t msec)
-{
-#ifdef CLOCK_MONOTONIC_RAW
-    if (clock_gettime(CLOCK_MONOTONIC_RAW, ts)) {
-        return -1;
-    }
-#elif defined (CLOCK_MONOTONIC)
-    if (clock_gettime(CLOCK_MONOTONIC, ts)) {
-        return -1;
-    }
-#else
-    /* no monotonic clock available, return real time */
-    if (nc_gettimespec_real_add(ts, 0)) {
-        return -1;
-    }
-#endif
-
-    if (!msec) {
-        return 0;
-    }
-
-    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
-
-    ts->tv_sec += msec / 1000;
-    ts->tv_nsec += (msec % 1000) * 1000000L;
-
-    if (ts->tv_nsec >= 1000000000L) {
-        ++ts->tv_sec;
-        ts->tv_nsec -= 1000000000L;
-    } else if (ts->tv_nsec < 0) {
-        --ts->tv_sec;
-        ts->tv_nsec += 1000000000L;
-    }
-
-    assert((ts->tv_nsec >= 0) && (ts->tv_nsec < 1000000000L));
-    return 0;
-}
-
-int32_t
-nc_difftimespec_real_cur(const struct timespec *ts)
-{
-    struct timespec cur;
-    int64_t nsec_diff = 0;
-
-    nc_gettimespec_real_add(&cur, 0);
-
-    nsec_diff += (((int64_t)ts->tv_sec) - ((int64_t)cur.tv_sec)) * 1000000000L;
-    nsec_diff += ((int64_t)ts->tv_nsec) - ((int64_t)cur.tv_nsec);
-
-    return nsec_diff / 1000000L;
-}
-
-int32_t
-nc_difftimespec_mono_cur(const struct timespec *ts)
-{
-    struct timespec cur;
-    int64_t nsec_diff = 0;
-
-    nc_gettimespec_mono_add(&cur, 0);
-
-    nsec_diff += (((int64_t)ts->tv_sec) - ((int64_t)cur.tv_sec)) * 1000000000L;
-    nsec_diff += ((int64_t)ts->tv_nsec) - ((int64_t)cur.tv_nsec);
-
-    return nsec_diff / 1000000L;
-}
+#ifdef NC_ENABLED_SSH_TLS
 
 const char *
-nc_keytype2str(NC_SSH_KEY_TYPE type)
+nc_privkey_format_to_str(NC_PRIVKEY_FORMAT format)
 {
-    switch (type) {
-    case NC_SSH_KEY_DSA:
-        return "DSA";
-    case NC_SSH_KEY_RSA:
+    switch (format) {
+    case NC_PRIVKEY_FORMAT_RSA:
         return "RSA";
-    case NC_SSH_KEY_ECDSA:
+    case NC_PRIVKEY_FORMAT_EC:
         return "EC";
+    case NC_PRIVKEY_FORMAT_X509:
+        return NULL;
+    case NC_PRIVKEY_FORMAT_OPENSSH:
+        return "OPENSSH";
     default:
-        break;
+        return NULL;
     }
-
-    return NULL;
 }
+
+#endif /* NC_ENABLED_SSH_TLS */
 
 int
 nc_sock_configure_keepalive(int sock, struct nc_keepalives *ka)
@@ -277,13 +218,14 @@ nc_session_rpc_lock(struct nc_session *session, int timeout, const char *func)
     }
 
     if (timeout > 0) {
-        nc_gettimespec_real_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
 
         /* LOCK */
-        ret = pthread_mutex_timedlock(&session->opts.server.rpc_lock, &ts_timeout);
+        ret = pthread_mutex_clocklock(&session->opts.server.rpc_lock, COMPAT_CLOCK_ID, &ts_timeout);
         if (!ret) {
             while (session->opts.server.rpc_inuse) {
-                ret = pthread_cond_timedwait(&session->opts.server.rpc_cond, &session->opts.server.rpc_lock, &ts_timeout);
+                ret = pthread_cond_clockwait(&session->opts.server.rpc_cond, &session->opts.server.rpc_lock,
+                        COMPAT_CLOCK_ID, &ts_timeout);
                 if (ret) {
                     pthread_mutex_unlock(&session->opts.server.rpc_lock);
                     break;
@@ -353,10 +295,10 @@ nc_session_rpc_unlock(struct nc_session *session, int timeout, const char *func)
     assert(session->opts.server.rpc_inuse);
 
     if (timeout > 0) {
-        nc_gettimespec_real_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
 
         /* LOCK */
-        ret = pthread_mutex_timedlock(&session->opts.server.rpc_lock, &ts_timeout);
+        ret = pthread_mutex_clocklock(&session->opts.server.rpc_lock, COMPAT_CLOCK_ID, &ts_timeout);
     } else if (!timeout) {
         /* LOCK */
         ret = pthread_mutex_trylock(&session->opts.server.rpc_lock);
@@ -396,9 +338,9 @@ nc_session_io_lock(struct nc_session *session, int timeout, const char *func)
     struct timespec ts_timeout;
 
     if (timeout > 0) {
-        nc_gettimespec_real_add(&ts_timeout, timeout);
+        nc_timeouttime_get(&ts_timeout, timeout);
 
-        ret = pthread_mutex_timedlock(session->io_lock, &ts_timeout);
+        ret = pthread_mutex_clocklock(session->io_lock, COMPAT_CLOCK_ID, &ts_timeout);
     } else if (!timeout) {
         ret = pthread_mutex_trylock(session->io_lock);
     } else { /* timeout == -1 */
@@ -445,14 +387,14 @@ nc_session_client_msgs_lock(struct nc_session *session, int *timeout, const char
 
     if (*timeout > 0) {
         /* get current time */
-        nc_gettimespec_real_add(&ts_start, 0);
+        nc_timeouttime_get(&ts_start, 0);
 
-        nc_gettimespec_real_add(&ts_timeout, *timeout);
+        nc_timeouttime_get(&ts_timeout, *timeout);
 
-        ret = pthread_mutex_timedlock(&session->opts.client.msgs_lock, &ts_timeout);
+        ret = pthread_mutex_clocklock(&session->opts.client.msgs_lock, COMPAT_CLOCK_ID, &ts_timeout);
         if (!ret) {
             /* update timeout based on what was elapsed */
-            diff_msec = nc_difftimespec_real_cur(&ts_start);
+            diff_msec = nc_timeouttime_cur_diff(&ts_start);
             *timeout -= diff_msec;
         }
     } else if (!*timeout) {
@@ -495,10 +437,7 @@ nc_session_client_msgs_unlock(struct nc_session *session, const char *func)
 API NC_STATUS
 nc_session_get_status(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NC_STATUS_ERR;
-    }
+    NC_CHECK_ARG_RET(session, session, NC_STATUS_ERR);
 
     return session->status;
 }
@@ -506,10 +445,7 @@ nc_session_get_status(const struct nc_session *session)
 API NC_SESSION_TERM_REASON
 nc_session_get_term_reason(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NC_SESSION_TERM_ERR;
-    }
+    NC_CHECK_ARG_RET(session, session, NC_SESSION_TERM_ERR);
 
     return session->term_reason;
 }
@@ -517,10 +453,7 @@ nc_session_get_term_reason(const struct nc_session *session)
 API uint32_t
 nc_session_get_killed_by(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return 0;
-    }
+    NC_CHECK_ARG_RET(session, session, 0);
 
     return session->killed_by;
 }
@@ -528,10 +461,7 @@ nc_session_get_killed_by(const struct nc_session *session)
 API uint32_t
 nc_session_get_id(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return 0;
-    }
+    NC_CHECK_ARG_RET(session, session, 0);
 
     return session->id;
 }
@@ -539,10 +469,7 @@ nc_session_get_id(const struct nc_session *session)
 API int
 nc_session_get_version(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return -1;
-    }
+    NC_CHECK_ARG_RET(session, session, -1);
 
     return session->version == NC_VERSION_10 ? 0 : 1;
 }
@@ -550,10 +477,7 @@ nc_session_get_version(const struct nc_session *session)
 API NC_TRANSPORT_IMPL
 nc_session_get_ti(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return 0;
-    }
+    NC_CHECK_ARG_RET(session, session, 0);
 
     return session->ti_type;
 }
@@ -561,10 +485,7 @@ nc_session_get_ti(const struct nc_session *session)
 API const char *
 nc_session_get_username(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     return session->username;
 }
@@ -572,10 +493,7 @@ nc_session_get_username(const struct nc_session *session)
 API const char *
 nc_session_get_host(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     return session->host;
 }
@@ -583,10 +501,8 @@ nc_session_get_host(const struct nc_session *session)
 API const char *
 nc_session_get_path(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
+
     if (session->ti_type != NC_TI_UNIX) {
         return NULL;
     }
@@ -597,10 +513,7 @@ nc_session_get_path(const struct nc_session *session)
 API uint16_t
 nc_session_get_port(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return 0;
-    }
+    NC_CHECK_ARG_RET(session, session, 0);
 
     return session->port;
 }
@@ -608,10 +521,7 @@ nc_session_get_port(const struct nc_session *session)
 API const struct ly_ctx *
 nc_session_get_ctx(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     return session->ctx;
 }
@@ -620,7 +530,7 @@ API void
 nc_session_set_data(struct nc_session *session, void *data)
 {
     if (!session) {
-        ERRARG("session");
+        ERRARG(NULL, "session");
         return;
     }
 
@@ -630,12 +540,21 @@ nc_session_set_data(struct nc_session *session, void *data)
 API void *
 nc_session_get_data(const struct nc_session *session)
 {
-    if (!session) {
-        ERRARG("session");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(session, session, NULL);
 
     return session->data;
+}
+
+API int
+nc_session_is_callhome(const struct nc_session *session)
+{
+    NC_CHECK_ARG_RET(session, session, 0);
+
+    if (session->flags & NC_SESSION_CALLHOME) {
+        return 1;
+    }
+
+    return 0;
 }
 
 NC_MSG_TYPE
@@ -737,7 +656,7 @@ nc_session_free_transport(struct nc_session *session, int *multisession)
         (void)siter;
         break;
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
     case NC_TI_LIBSSH: {
         int r;
 
@@ -803,9 +722,6 @@ nc_session_free_transport(struct nc_session *session, int *multisession)
         }
         break;
     }
-#endif
-
-#ifdef NC_ENABLED_TLS
     case NC_TI_OPENSSL:
         /* remember sock so we can close it */
         sock = SSL_get_fd(session->ti.tls);
@@ -819,7 +735,7 @@ nc_session_free_transport(struct nc_session *session, int *multisession)
             X509_free(session->opts.server.client_cert);
         }
         break;
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
     case NC_TI_NONE:
         break;
     }
@@ -850,10 +766,10 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         ATOMIC_STORE_RELAXED(session->opts.client.ntf_thread_running, 0);
 
         /* wait for them */
-        nc_gettimespec_mono_add(&ts, NC_SESSION_FREE_LOCK_TIMEOUT);
+        nc_timeouttime_get(&ts, NC_SESSION_FREE_LOCK_TIMEOUT);
         while (ATOMIC_LOAD_RELAXED(session->opts.client.ntf_thread_count)) {
             usleep(NC_TIMEOUT_STEP);
-            if (nc_difftimespec_mono_cur(&ts) < 1) {
+            if (nc_timeouttime_cur_diff(&ts) < 1) {
                 ERR(session, "Waiting for notification thread exit failed (timed out).");
                 break;
             }
@@ -919,7 +835,7 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         }
 
         /* LY ext data */
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
         struct nc_session *siter;
 
         if ((session->flags & NC_SESSION_SHAREDCTX) && session->ti.libssh.next) {
@@ -933,7 +849,7 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
                 }
             }
         } else
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
         {
             lyd_free_siblings(session->opts.client.ext_data);
         }
@@ -954,12 +870,12 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
     if ((session->side == NC_SERVER) && (session->flags & NC_SESSION_CH_THREAD)) {
         pthread_cond_signal(&session->opts.server.ch_cond);
 
-        nc_gettimespec_real_add(&ts, NC_SESSION_FREE_LOCK_TIMEOUT);
+        nc_timeouttime_get(&ts, NC_SESSION_FREE_LOCK_TIMEOUT);
 
         /* wait for CH thread to actually wake up and terminate */
         r = 0;
         while (!r && (session->flags & NC_SESSION_CH_THREAD)) {
-            r = pthread_cond_timedwait(&session->opts.server.ch_cond, &session->opts.server.ch_lock, &ts);
+            r = pthread_cond_clockwait(&session->opts.server.ch_cond, &session->opts.server.ch_lock, COMPAT_CLOCK_ID, &ts);
         }
         if (r) {
             ERR(session, "Waiting for Call Home thread failed (%s).", strerror(r));
@@ -1055,14 +971,13 @@ nc_server_get_cpblts_version(const struct ly_ctx *ctx, LYS_VERSION version)
     uint32_t i, u;
     LY_ARRAY_COUNT_TYPE v;
     char *yl_content_id;
+    uint32_t wd_also_supported;
+    uint32_t wd_basic_mode;
 
 #define NC_CPBLT_BUF_LEN 4096
     char str[NC_CPBLT_BUF_LEN];
 
-    if (!ctx) {
-        ERRARG("ctx");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, ctx, NULL);
 
     cpblts = malloc(size * sizeof *cpblts);
     if (!cpblts) {
@@ -1111,11 +1026,12 @@ nc_server_get_cpblts_version(const struct ly_ctx *ctx, LYS_VERSION version)
 
     mod = ly_ctx_get_module_implemented(ctx, "ietf-netconf-with-defaults");
     if (mod) {
-        if (!server_opts.wd_basic_mode) {
+        wd_basic_mode = ATOMIC_LOAD_RELAXED(server_opts.wd_basic_mode);
+        if (!wd_basic_mode) {
             VRB(NULL, "with-defaults capability will not be advertised even though \"ietf-netconf-with-defaults\" model is present, unknown basic-mode.");
         } else {
             strcpy(str, "urn:ietf:params:netconf:capability:with-defaults:1.0");
-            switch (server_opts.wd_basic_mode) {
+            switch (wd_basic_mode) {
             case NC_WD_ALL:
                 strcat(str, "?basic-mode=report-all");
                 break;
@@ -1130,18 +1046,19 @@ nc_server_get_cpblts_version(const struct ly_ctx *ctx, LYS_VERSION version)
                 break;
             }
 
-            if (server_opts.wd_also_supported) {
+            wd_also_supported = ATOMIC_LOAD_RELAXED(server_opts.wd_also_supported);
+            if (wd_also_supported) {
                 strcat(str, "&also-supported=");
-                if (server_opts.wd_also_supported & NC_WD_ALL) {
+                if (wd_also_supported & NC_WD_ALL) {
                     strcat(str, "report-all,");
                 }
-                if (server_opts.wd_also_supported & NC_WD_ALL_TAG) {
+                if (wd_also_supported & NC_WD_ALL_TAG) {
                     strcat(str, "report-all-tagged,");
                 }
-                if (server_opts.wd_also_supported & NC_WD_TRIM) {
+                if (wd_also_supported & NC_WD_TRIM) {
                     strcat(str, "trim,");
                 }
-                if (server_opts.wd_also_supported & NC_WD_EXPLICIT) {
+                if (wd_also_supported & NC_WD_EXPLICIT) {
                     strcat(str, "explicit,");
                 }
                 str[strlen(str) - 1] = '\0';
@@ -1535,245 +1452,4 @@ nc_handshake_io(struct nc_session *session)
     }
 
     return type;
-}
-
-#ifdef NC_ENABLED_SSH
-
-static void
-nc_ssh_init(void)
-{
-#if (LIBSSH_VERSION_INT < SSH_VERSION_INT(0, 8, 0))
-    ssh_threads_set_callbacks(ssh_threads_get_pthread());
-    ssh_init();
-#endif
-}
-
-static void
-nc_ssh_destroy(void)
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    FIPS_mode_set(0);
-    CONF_modules_unload(1);
-    nc_thread_destroy();
-#endif
-
-#if (LIBSSH_VERSION_INT < SSH_VERSION_INT(0, 8, 0))
-    ssh_finalize();
-#endif
-}
-
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-
-struct CRYPTO_dynlock_value {
-    pthread_mutex_t lock;
-};
-
-static struct CRYPTO_dynlock_value *
-tls_dyn_create_func(const char *UNUSED(file), int UNUSED(line))
-{
-    struct CRYPTO_dynlock_value *value;
-
-    value = malloc(sizeof *value);
-    if (!value) {
-        ERRMEM;
-        return NULL;
-    }
-    pthread_mutex_init(&value->lock, NULL);
-
-    return value;
-}
-
-static void
-tls_dyn_lock_func(int mode, struct CRYPTO_dynlock_value *l, const char *UNUSED(file), int UNUSED(line))
-{
-    /* mode can also be CRYPTO_READ or CRYPTO_WRITE, but all the examples
-     * I found ignored this fact, what do I know... */
-    if (mode & CRYPTO_LOCK) {
-        pthread_mutex_lock(&l->lock);
-    } else {
-        pthread_mutex_unlock(&l->lock);
-    }
-}
-
-static void
-tls_dyn_destroy_func(struct CRYPTO_dynlock_value *l, const char *UNUSED(file), int UNUSED(line))
-{
-    pthread_mutex_destroy(&l->lock);
-    free(l);
-}
-
-#endif
-
-#endif /* NC_ENABLED_TLS */
-
-#if defined (NC_ENABLED_TLS) && !defined (NC_ENABLED_SSH)
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-static pthread_mutex_t *tls_locks;
-
-static void
-tls_thread_locking_func(int mode, int n, const char *UNUSED(file), int UNUSED(line))
-{
-    if (mode & CRYPTO_LOCK) {
-        pthread_mutex_lock(tls_locks + n);
-    } else {
-        pthread_mutex_unlock(tls_locks + n);
-    }
-}
-
-static void
-tls_thread_id_func(CRYPTO_THREADID *tid)
-{
-    CRYPTO_THREADID_set_numeric(tid, (unsigned long)pthread_self());
-}
-
-#endif
-
-static void
-nc_tls_init(void)
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    SSL_load_error_strings();
-    ERR_load_BIO_strings();
-    SSL_library_init();
-
-    int i;
-
-    tls_locks = malloc(CRYPTO_num_locks() * sizeof *tls_locks);
-    if (!tls_locks) {
-        ERRMEM;
-        return;
-    }
-    for (i = 0; i < CRYPTO_num_locks(); ++i) {
-        pthread_mutex_init(tls_locks + i, NULL);
-    }
-
-    CRYPTO_THREADID_set_callback(tls_thread_id_func);
-    CRYPTO_set_locking_callback(tls_thread_locking_func);
-
-    CRYPTO_set_dynlock_create_callback(tls_dyn_create_func);
-    CRYPTO_set_dynlock_lock_callback(tls_dyn_lock_func);
-    CRYPTO_set_dynlock_destroy_callback(tls_dyn_destroy_func);
-#endif
-}
-
-static void
-nc_tls_destroy(void)
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    FIPS_mode_set(0);
-    CRYPTO_cleanup_all_ex_data();
-    nc_thread_destroy();
-    EVP_cleanup();
-    ERR_free_strings();
-#if OPENSSL_VERSION_NUMBER < 0x10002000L // < 1.0.2
-    sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
-#elif OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    SSL_COMP_free_compression_methods();
-#endif
-
-    int i;
-
-    CRYPTO_THREADID_set_callback(NULL);
-    CRYPTO_set_locking_callback(NULL);
-    for (i = 0; i < CRYPTO_num_locks(); ++i) {
-        pthread_mutex_destroy(tls_locks + i);
-    }
-    free(tls_locks);
-
-    CRYPTO_set_dynlock_create_callback(NULL);
-    CRYPTO_set_dynlock_lock_callback(NULL);
-    CRYPTO_set_dynlock_destroy_callback(NULL);
-#endif
-}
-
-#endif /* NC_ENABLED_TLS && !NC_ENABLED_SSH */
-
-#if defined (NC_ENABLED_SSH) && defined (NC_ENABLED_TLS)
-
-static void
-nc_ssh_tls_init(void)
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    SSL_load_error_strings();
-    ERR_load_BIO_strings();
-    SSL_library_init();
-#endif
-
-    nc_ssh_init();
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    CRYPTO_set_dynlock_create_callback(tls_dyn_create_func);
-    CRYPTO_set_dynlock_lock_callback(tls_dyn_lock_func);
-    CRYPTO_set_dynlock_destroy_callback(tls_dyn_destroy_func);
-#endif
-}
-
-static void
-nc_ssh_tls_destroy(void)
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    ERR_free_strings();
-# if OPENSSL_VERSION_NUMBER < 0x10002000L // < 1.0.2
-    sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
-# elif OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    SSL_COMP_free_compression_methods();
-# endif
-#endif
-
-    nc_ssh_destroy();
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    CRYPTO_set_dynlock_create_callback(NULL);
-    CRYPTO_set_dynlock_lock_callback(NULL);
-    CRYPTO_set_dynlock_destroy_callback(NULL);
-#endif
-}
-
-#endif /* NC_ENABLED_SSH && NC_ENABLED_TLS */
-
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
-
-API void
-nc_thread_destroy(void)
-{
-    /* caused data-races and seems not neccessary for avoiding valgrind reachable memory */
-    // CRYPTO_cleanup_all_ex_data();
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L // < 1.1.0
-    CRYPTO_THREADID crypto_tid;
-
-    CRYPTO_THREADID_current(&crypto_tid);
-    ERR_remove_thread_state(&crypto_tid);
-#endif
-}
-
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
-
-void
-nc_init(void)
-{
-#if defined (NC_ENABLED_SSH) && defined (NC_ENABLED_TLS)
-    nc_ssh_tls_init();
-#elif defined (NC_ENABLED_SSH)
-    nc_ssh_init();
-#elif defined (NC_ENABLED_TLS)
-    nc_tls_init();
-#endif
-}
-
-void
-nc_destroy(void)
-{
-#if defined (NC_ENABLED_SSH) && defined (NC_ENABLED_TLS)
-    nc_ssh_tls_destroy();
-#elif defined (NC_ENABLED_SSH)
-    nc_ssh_destroy();
-#elif defined (NC_ENABLED_TLS)
-    nc_tls_destroy();
-#endif
 }

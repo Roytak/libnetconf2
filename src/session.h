@@ -1,10 +1,11 @@
 /**
  * @file session.h
  * @author Radek Krejci <rkrejci@cesnet.cz>
+ * @author Michal Vasko <mvasko@cesnet.cz>
  * @brief libnetconf2 session manipulation
  *
  * @copyright
- * Copyright (c) 2015 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2015 - 2023 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -22,7 +23,7 @@ extern "C" {
 
 #include "netconf.h"
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 
 /**
  * @brief Enumeration of NETCONF SSH authentication methods
@@ -33,9 +34,16 @@ typedef enum {
     NC_SSH_AUTH_INTERACTIVE = 0x04 /**< interactive SSH authentication */
 } NC_SSH_AUTH_TYPE;
 
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
+/**
+ * @brief Enumeration of host key checking and known_hosts entry adding modes
+ */
+typedef enum {
+    NC_SSH_KNOWNHOSTS_ASK = 0,      /**< add a known_hosts entry, but with a prompt */
+    NC_SSH_KNOWNHOSTS_STRICT,       /**< do not add a known_hosts entry and the server's host key must be present in the configured known_hosts file */
+    NC_SSH_KNOWNHOSTS_ACCEPT_NEW,   /**< add a known_hosts entry without a prompt */
+    NC_SSH_KNOWNHOSTS_ACCEPT,       /**< add a known_hosts entry without a prompt and allow connections to servers which changed their host key */
+    NC_SSH_KNOWNHOSTS_SKIP          /**< do not add a known_hosts entry and skip all host key checks */
+} NC_SSH_KNOWNHOSTS_MODE;
 
 /**
  * @brief Enumeration of cert-to-name mapping types
@@ -50,7 +58,17 @@ typedef enum {
     NC_TLS_CTN_COMMON_NAME      /**< common name as username */
 } NC_TLS_CTN_MAPTYPE;
 
-#endif /* NC_ENABLED_TLS */
+/**
+ * @brief Enumeration of TLS versions.
+ */
+typedef enum {
+    NC_TLS_VERSION_10 = 1,  /**< TLS1.0 */
+    NC_TLS_VERSION_11 = 2,  /**< TLS1.1 */
+    NC_TLS_VERSION_12 = 4,  /**< TLS1.2 */
+    NC_TLS_VERSION_13 = 8   /**< TLS1.3 */
+} NC_TLS_VERSION;
+
+#endif /* NC_ENABLED_SSH_TLS */
 
 /**
  * @brief Enumeration of possible session statuses
@@ -71,12 +89,11 @@ typedef enum {
     NC_TI_FD,         /**< file descriptors - use standard input/output, transport protocol is implemented
                            outside the current application */
     NC_TI_UNIX,       /**< unix socket */
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
     NC_TI_LIBSSH,     /**< libssh - use libssh library, only for NETCONF over SSH transport */
-#endif
-#ifdef NC_ENABLED_TLS
+
     NC_TI_OPENSSL     /**< OpenSSL - use OpenSSL library, only for NETCONF over TLS transport */
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
 } NC_TRANSPORT_IMPL;
 
 /**
@@ -96,16 +113,6 @@ typedef enum {
     NC_CH_LAST_CONNECTED,
     NC_CH_RANDOM
 } NC_CH_START_WITH;
-
-/**
- * @brief Enumeration of SSH key types.
- */
-typedef enum {
-    NC_SSH_KEY_UNKNOWN = 0,
-    NC_SSH_KEY_DSA,
-    NC_SSH_KEY_RSA,
-    NC_SSH_KEY_ECDSA
-} NC_SSH_KEY_TYPE;
 
 /**
  * @brief NETCONF session object
@@ -217,26 +224,20 @@ void nc_session_set_data(struct nc_session *session, void *data);
 void *nc_session_get_data(const struct nc_session *session);
 
 /**
+ * @brief Learn whether a session was created using Call Home or not.
+ *
+ * @param[in] session Session to get the information from.
+ * @return 0 if a standard session, non-zero if a Call Home session.
+ */
+int nc_session_is_callhome(const struct nc_session *session);
+
+/**
  * @brief Free the NETCONF session object.
  *
  * @param[in] session Object to free.
  * @param[in] data_free Session user data destructor.
  */
 void nc_session_free(struct nc_session *session, void (*data_free)(void *));
-
-#if defined (NC_ENABLED_SSH) || defined (NC_ENABLED_TLS)
-
-/**
- * @brief Free all the dynamically allocated thread-specific libssl/libcrypto
- * resources.
- *
- * This function should be called only if init (nc_client_init(), respectively nc_server_init()) was called.
- * Call it in every thread your application creates just before the thread exits. In the last thread
- * (usually the main one) call nc_client_destroy(), respectively nc_server_destroy().
- */
-void nc_thread_destroy(void);
-
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
 #ifdef __cplusplus
 }

@@ -12,6 +12,8 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -36,8 +38,6 @@ static int
 setup_client(void **state)
 {
     (void)state;
-
-    nc_client_init();
 
     return 0;
 }

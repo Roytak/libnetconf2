@@ -12,6 +12,8 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#define _GNU_SOURCE
+
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,8 +52,6 @@ main(void)
     void *arg;
     pthread_t t;
     int r;
-
-    nc_client_init();
 
     /*
      * TEST sharing the thread context

@@ -13,15 +13,21 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#define _GNU_SOURCE /* pthread_rwlock_t, strdup */
+
 #include <assert.h>
 #include <ctype.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <libyang/libyang.h>
 
-#include "libnetconf.h"
+#include "compat.h"
+#include "config.h"
+#include "log_p.h"
+#include "messages_client.h"
+#include "messages_p.h"
+#include "netconf.h"
 
 const char *rpcedit_dfltop2str[] = {NULL, "merge", "replace", "none"};
 const char *rpcedit_testopt2str[] = {NULL, "test-then-set", "set", "test-only"};
@@ -30,10 +36,7 @@ const char *rpcedit_erropt2str[] = {NULL, "stop-on-error", "continue-on-error", 
 API NC_RPC_TYPE
 nc_rpc_get_type(const struct nc_rpc *rpc)
 {
-    if (!rpc) {
-        ERRARG("rpc");
-        return 0;
-    }
+    NC_CHECK_ARG_RET(NULL, rpc, 0);
 
     return rpc->type;
 }
@@ -43,8 +46,9 @@ nc_rpc_act_generic(const struct lyd_node *data, NC_PARAMTYPE paramtype)
 {
     struct nc_rpc_act_generic *rpc;
 
-    if (!data || data->next || (data->prev != data)) {
-        ERRARG("data");
+    NC_CHECK_ARG_RET(NULL, data, data->next, NULL);
+    if (data->prev != data) {
+        ERR(NULL, "nc_rpc_act_generic missing data");
         return NULL;
     }
 
@@ -74,10 +78,7 @@ nc_rpc_act_generic_xml(const char *xml_str, NC_PARAMTYPE paramtype)
 {
     struct nc_rpc_act_generic *rpc;
 
-    if (!xml_str) {
-        ERRARG("xml_str");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, xml_str, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -102,10 +103,7 @@ nc_rpc_getconfig(NC_DATASTORE source, const char *filter, NC_WD_MODE wd_mode, NC
 {
     struct nc_rpc_getconfig *rpc;
 
-    if (!source) {
-        ERRARG("source");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, source, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is neither an XML subtree nor an XPath expression (invalid first char '%c').", filter[0]);
@@ -137,13 +135,7 @@ nc_rpc_edit(NC_DATASTORE target, NC_RPC_EDIT_DFLTOP default_op, NC_RPC_EDIT_TEST
 {
     struct nc_rpc_edit *rpc;
 
-    if (!target) {
-        ERRARG("target");
-        return NULL;
-    } else if (!edit_content) {
-        ERRARG("edit_content");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, target, edit_content, NULL);
 
     if (edit_content[0] && (edit_content[0] != '<') && !isalpha(edit_content[0])) {
         ERR(NULL, "<edit-config> content is neither a URL nor an XML config (invalid first char '%c').", edit_content[0]);
@@ -177,13 +169,7 @@ nc_rpc_copy(NC_DATASTORE target, const char *url_trg, NC_DATASTORE source, const
 {
     struct nc_rpc_copy *rpc;
 
-    if (!target) {
-        ERRARG("target");
-        return NULL;
-    } else if (!source) {
-        ERRARG("source");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, target, source, NULL);
 
     if (url_or_config_src && url_or_config_src[0] && (url_or_config_src[0] != '<') && !isalpha(url_or_config_src[0])) {
         ERR(NULL, "<copy-config> source is neither a URL nor an XML config (invalid first char '%c').", url_or_config_src[0]);
@@ -220,10 +206,7 @@ nc_rpc_delete(NC_DATASTORE target, const char *url, NC_PARAMTYPE paramtype)
 {
     struct nc_rpc_delete *rpc;
 
-    if (!target) {
-        ERRARG("target");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, target, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -248,10 +231,7 @@ nc_rpc_lock(NC_DATASTORE target)
 {
     struct nc_rpc_lock *rpc;
 
-    if (!target) {
-        ERRARG("target");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, target, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -270,10 +250,7 @@ nc_rpc_unlock(NC_DATASTORE target)
 {
     struct nc_rpc_lock *rpc;
 
-    if (!target) {
-        ERRARG("target");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, target, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -320,10 +297,7 @@ nc_rpc_kill(uint32_t session_id)
 {
     struct nc_rpc_kill *rpc;
 
-    if (!session_id) {
-        ERRARG("session_id");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, session_id, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -410,10 +384,7 @@ nc_rpc_validate(NC_DATASTORE source, const char *url_or_config, NC_PARAMTYPE par
 {
     struct nc_rpc_validate *rpc;
 
-    if (!source) {
-        ERRARG("source");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, source, NULL);
 
     if (url_or_config && url_or_config[0] && (url_or_config[0] != '<') && !isalpha(url_or_config[0])) {
         ERR(NULL, "<validate> source is neither a URL nor an XML config (invalid first char '%c').", url_or_config[0]);
@@ -443,10 +414,7 @@ nc_rpc_getschema(const char *identifier, const char *version, const char *format
 {
     struct nc_rpc_getschema *rpc;
 
-    if (!identifier) {
-        ERRARG("identifier");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, identifier, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -526,11 +494,10 @@ nc_rpc_getdata(const char *datastore, const char *filter, const char *config_fil
     struct nc_rpc_getdata *rpc = NULL;
     int i;
 
+    NC_CHECK_ARG_RET(NULL, datastore, NULL);
+
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is neither an XML subtree nor an XPath expression (invalid first char '%c').", filter[0]);
-        return NULL;
-    } else if (!datastore) {
-        ERRARG("datastore");
         return NULL;
     }
 
@@ -592,13 +559,7 @@ nc_rpc_editdata(const char *datastore, NC_RPC_EDIT_DFLTOP default_op, const char
 {
     struct nc_rpc_editdata *rpc;
 
-    if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    } else if (!edit_content) {
-        ERRARG("edit_content");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, datastore, edit_content, NULL);
 
     if (edit_content[0] && (edit_content[0] != '<') && !isalpha(edit_content[0])) {
         ERR(NULL, "<edit-data> content is neither a URL nor an XML config (invalid first char '%c').", edit_content[0]);
@@ -634,10 +595,7 @@ nc_rpc_establishsub(const char *filter, const char *stream_name, const char *sta
 {
     struct nc_rpc_establishsub *rpc;
 
-    if (!stream_name) {
-        ERRARG("stream_name");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, stream_name, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -687,10 +645,7 @@ nc_rpc_modifysub(uint32_t id, const char *filter, const char *stop_time, NC_PARA
 {
     struct nc_rpc_modifysub *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -726,10 +681,7 @@ nc_rpc_deletesub(uint32_t id)
 {
     struct nc_rpc_deletesub *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -748,10 +700,7 @@ nc_rpc_killsub(uint32_t id)
 {
     struct nc_rpc_killsub *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {
@@ -771,13 +720,7 @@ nc_rpc_establishpush_periodic(const char *datastore, const char *filter, const c
 {
     struct nc_rpc_establishpush *rpc;
 
-    if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    } else if (!period) {
-        ERRARG("period");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, datastore, period, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -831,10 +774,7 @@ nc_rpc_establishpush_onchange(const char *datastore, const char *filter, const c
     struct nc_rpc_establishpush *rpc;
     uint32_t i;
 
-    if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, datastore, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -893,13 +833,7 @@ nc_rpc_modifypush_periodic(uint32_t id, const char *datastore, const char *filte
 {
     struct nc_rpc_modifypush *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    } else if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, datastore, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -948,13 +882,7 @@ nc_rpc_modifypush_onchange(uint32_t id, const char *datastore, const char *filte
 {
     struct nc_rpc_modifypush *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    } else if (!datastore) {
-        ERRARG("datastore");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, datastore, NULL);
 
     if (filter && filter[0] && (filter[0] != '<') && (filter[0] != '/') && !isalpha(filter[0])) {
         ERR(NULL, "Filter is not an XML subtree, an XPath expression, not a filter reference (invalid first char '%c').",
@@ -997,10 +925,7 @@ nc_rpc_resyncsub(uint32_t id)
 {
     struct nc_rpc_resyncsub *rpc;
 
-    if (!id) {
-        ERRARG("id");
-        return NULL;
-    }
+    NC_CHECK_ARG_RET(NULL, id, NULL);
 
     rpc = malloc(sizeof *rpc);
     if (!rpc) {

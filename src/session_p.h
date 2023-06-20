@@ -5,7 +5,7 @@
  * @brief libnetconf2 session manipulation
  *
  * @copyright
- * Copyright (c) 2017 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2017 - 2023 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -17,34 +17,22 @@
 #ifndef NC_SESSION_PRIVATE_H_
 #define NC_SESSION_PRIVATE_H_
 
+#define _GNU_SOURCE
+
 #include <pthread.h>
 #include <stdint.h>
-#include <sys/stat.h>
 
 #include <libyang/libyang.h>
 
 #include "compat.h"
-#include "libnetconf.h"
-#include "messages_client.h"
-#include "netconf.h"
-#include "session.h"
+#include "config.h"
 #include "session_client.h"
-
-#ifdef NC_ENABLED_SSH
-
-# include <libssh/callbacks.h>
-# include <libssh/libssh.h>
-# include <libssh/server.h>
-
-/* seconds */
-# define NC_SSH_TIMEOUT 10
-/* number of all supported authentication methods */
-# define NC_SSH_AUTH_COUNT 3
 
 /**
  * Enumeration of diff operation types.
  */
 typedef enum {
+    NC_OP_UNKNOWN = 0,
     NC_OP_NONE,
     NC_OP_CREATE,
     NC_OP_DELETE,
@@ -60,16 +48,278 @@ typedef enum {
     NC_STORE_TRUSTSTORE /**< key/certificate is stored externally in a truststore module YANG data */
 } NC_STORE_TYPE;
 
+#ifdef NC_ENABLED_SSH_TLS
+
+#include <libssh/libssh.h>
+#include <openssl/ssl.h>
+
+/* seconds */
+#define NC_SSH_TIMEOUT 10
+
+/* number of all supported authentication methods */
+#define NC_SSH_AUTH_COUNT 3
+
 /**
- * Enumeration of SSH public key representation types.
+ * Enumeration of SSH public key formats.
  */
 typedef enum {
-    NC_SSH_PUBKEY_SSH2, /**< begins with BEGIN SSH2 PUBLICKEY, see RFC 4716 */
-    NC_SSH_PUBKEY_X509 /**< begins with BEGIN PUBLICKEY, see RFC 5280 sec. 4.1.2.7 */
-} NC_SSH_PUBKEY_TYPE;
+    NC_PUBKEY_FORMAT_SSH2, /**< begins with BEGIN SSH2 PUBLICKEY, see RFC 4716 */
+    NC_PUBKEY_FORMAT_X509 /**< begins with BEGIN PUBLICKEY, see RFC 5280 sec. 4.1.2.7 */
+} NC_PUBKEY_FORMAT;
 
-/* ACCESS unlocked */
+/**
+ * Enumeration of private key file formats.
+ */
+typedef enum {
+    NC_PRIVKEY_FORMAT_RSA,      /**< PKCS1 RSA format */
+    NC_PRIVKEY_FORMAT_EC,       /**< SEC1 EC format */
+    NC_PRIVKEY_FORMAT_X509,     /**< X509 (PKCS8) format */
+    NC_PRIVKEY_FORMAT_OPENSSH,  /**< OpenSSH format */
+    NC_PRIVKEY_FORMAT_UNKNOWN   /**< Unknown format */
+} NC_PRIVKEY_FORMAT;
+
+/**
+ * @brief A basic certificate.
+ */
+struct nc_certificate {
+    char *name; /**< Arbitrary name of the certificate. */
+    char *data; /**< Base-64 encoded certificate. */
+};
+
+struct nc_certificate_bag {
+    char *name;
+    struct nc_certificate *certs;
+    uint16_t cert_count;
+};
+
+/**
+ * @brief An asymmetric key.
+ */
+struct nc_asymmetric_key {
+    char *name;                     /**< Arbitrary name of the key. */
+
+    NC_PUBKEY_FORMAT pubkey_type;   /**< Type of the public key. */
+    char *pubkey_data;              /**< Base-64 encoded public key. */
+    NC_PRIVKEY_FORMAT privkey_type; /**< Type of the private key. */
+    char *privkey_data;             /**< Base-64 encoded private key. */
+
+    struct nc_certificate *certs;   /**< The certificates associated with this key. */
+    uint16_t cert_count;            /**< Number of certificates associated with this key. */
+};
+
+/**
+ * @brief A symmetric key.
+ */
+struct nc_symmetric_key {
+    char *name; /**< Arbitrary name of the key. */
+    char *data; /**< Base-64 encoded key. */
+};
+
+/**
+ * @brief A public key.
+ */
+struct nc_public_key {
+    char *name;             /**< Arbitrary name of the public key. */
+    NC_PUBKEY_FORMAT type;  /**< Type of the public key. */
+    char *data;             /**< Base-64 encoded public key. */
+};
+
+struct nc_public_key_bag {
+    char *name;
+    struct nc_public_key *pubkeys;
+    uint16_t pubkey_count;
+};
+
+struct nc_truststore {
+    struct nc_certificate_bag *cert_bags;
+    uint16_t cert_bag_count;
+
+    struct nc_public_key_bag *pub_bags;
+    uint16_t pub_bag_count;
+};
+
+/**
+ * @brief Keystore YANG module representation.
+ */
+struct nc_keystore {
+    struct nc_asymmetric_key *asym_keys;    /**< Stored asymmetric keys. */
+    uint16_t asym_key_count;                /**< Count of stored asymmetric keys. */
+
+    struct nc_symmetric_key *sym_keys;      /**< Stored symmetric keys. */
+    uint16_t sym_key_count;                 /**< Count of stored symmetric keys. */
+};
+
+/**
+ * @brief Tracks the state of a client's authentication.
+ */
+struct nc_auth_state {
+    int auth_method_count;  /**< The number of auth. methods that the user supports. */
+    int auth_success_count; /**< The number of auth. methods that ended successfully. */
+};
+
+/**
+ * @brief A server's authorized client.
+ */
+struct nc_client_auth {
+    char *username;                         /**< Arbitrary username. */
+
+    NC_STORE_TYPE store;                  /**< Specifies how/where the client's public key is stored. */
+    union {
+        struct {
+            struct nc_public_key *pubkeys;  /**< The client's public keys. */
+            uint16_t pubkey_count;          /**< The number of client's public keys. */
+        };
+        struct nc_public_key_bag *ts_ref;                 /**< Reference to a truststore. */
+    };
+
+    char *password;                         /**< Client's password */
+    char *pam_config_name;                  /**< Client's PAM configuration file name. */
+    char *pam_config_dir;                   /**< Client's PAM configuration file directory. */
+    int supports_none;                      /**< Implies that the client supports the none authentication method. */
+};
+
+/**
+ * @brief The server's hostkey.
+ */
+struct nc_hostkey {
+    char *name;                             /**<  Arbitrary name of the host key. */
+
+    NC_STORE_TYPE store;                  /**< Specifies how/where the key is stored. */
+    union {
+        struct nc_asymmetric_key key;       /**< The server's hostkey. */
+        struct nc_asymmetric_key *ks_ref;   /**< Reference to a key-store. */
+    };
+};
+
+/**
+ * @brief Server options for configuring the SSH transport protocol.
+ */
+struct nc_server_ssh_opts {
+    struct nc_hostkey *hostkeys;            /**< Server's hostkeys. */
+    uint16_t hostkey_count;                 /**< Number of server's hostkeys. */
+
+    struct nc_client_auth *auth_clients;    /**< Server's authorized clients. */
+    uint16_t client_count;                  /**< Number of server's authorized clients. */
+
+    struct nc_endpt *endpt_client_ref;      /**< Reference to another endpoint (used for client authentication). */
+
+    char *hostkey_algs;                     /**< Hostkey algorithms supported by the server. */
+    char *encryption_algs;                  /**< Encryption algorithms supported by the server. */
+    char *kex_algs;                         /**< Key exchange algorithms supported by the server. */
+    char *mac_algs;                         /**< MAC algorithms supported by the server. */
+
+    uint16_t auth_attempts;                 /**< Number of allowed authentication attempts. */
+    uint16_t auth_timeout;                  /**< Authentication timeout. */
+};
+
+/**
+ * @brief Certificate grouping (either local-definition or truststore reference).
+ */
+struct nc_cert_grouping {
+    NC_STORE_TYPE store;                    /**< Specifies how/where the certificates are stored. */
+    union {
+        struct {
+            struct nc_certificate *certs;   /**< Local-defined certificates */
+            uint16_t cert_count;            /**< Certificate count */
+        };
+        struct nc_certificate_bag *ts_ref;  /**< Referenced trustore certificate bag */
+    };
+};
+
+/**
+ * @brief Storing downloaded data via CURL.
+ */
+struct nc_curl_data {
+    unsigned char *data;    /**< Downloaded data */
+    size_t size;            /**< Size of downloaded data */
+};
+
+/**
+ * @brief Cert-to-name entries.
+ */
+struct nc_ctn {
+    uint32_t id;                        /**< ID of the entry, the lower the higher priority */
+    char *fingerprint;                  /**< Fingerprint of the entry */
+    NC_TLS_CTN_MAPTYPE map_type;        /**< Specifies how to get the username from the certificate */
+    char *name;                         /**< Username for this entry */
+    struct nc_ctn *next;                /**< Linked-list reference to the next entry */
+};
+
+/**
+ * @brief Server options for configuring the TLS transport protocol.
+ */
+struct nc_server_tls_opts {
+    NC_STORE_TYPE store;                        /**< Specifies how/where the server identity is stored. */
+    union {
+        struct {
+            NC_PUBKEY_FORMAT pubkey_type;       /**< Server public key type */
+            char *pubkey_data;                  /**< Server's public key */
+
+            NC_PRIVKEY_FORMAT privkey_type;     /**< Server private key type */
+            char *privkey_data;                 /**< Server's private key */
+
+            char *cert_data;                    /**< Server's certificate */
+        };
+
+        struct {
+            struct nc_asymmetric_key *key_ref;  /**< Reference to the server's key */
+            struct nc_certificate *cert_ref;    /**< Reference to the concrete server's certificate */
+        };
+    };
+
+    struct nc_cert_grouping ca_certs;           /**< Client certificate authorities */
+    struct nc_cert_grouping ee_certs;           /**< Client end-entity certificates */
+    char *crl_url;                              /**< URI to download the CRL from */
+    char *crl_path;                             /**< Path to a CRL file */
+    int crl_cert_ext;                           /**< Indicates to use CA's distribution points to obtain CRLs */
+    X509_STORE *crl_store;                      /**< Stores all the CRLs */
+
+    struct nc_endpt *endpt_client_ref;          /**< Reference to another endpoint (used for client authentication). */
+
+    unsigned int tls_versions;                  /**< TLS versions */
+    char *ciphers;                              /**< TLS ciphers */
+
+    struct nc_ctn *ctn;                         /**< Cert-to-name entries */
+};
+
+#endif /* NC_ENABLED_SSH_TLS */
+
+/**
+ * @brief Keepalives configuration data.
+ */
+struct nc_keepalives {
+    int enabled;                /**< Indicates that keepalives are enabled. */
+    uint16_t idle_time;         /**< Idle timeout. */
+    uint16_t max_probes;        /**< Maximum number of probes. */
+    uint16_t probe_interval;    /**< Probe interval. */
+};
+
+/**
+ * @brief UNIX socket connection configuration.
+ */
+struct nc_server_unix_opts {
+    char *address;  /**< Address of the socket. */
+    mode_t mode;    /**< Socket's mode. */
+    uid_t uid;      /**< Socket's uid. */
+    gid_t gid;      /**< Socket's gid. */
+};
+
+/**
+ * @brief Stores information about a bind.
+ */
+struct nc_bind {
+    char *address;  /**< Bind's address. */
+    uint16_t port;  /**< Bind's port. */
+    int sock;       /**< Bind's socket. */
+    int pollin;     /**< Specifies, which sockets to poll on. */
+};
+
+#ifdef NC_ENABLED_SSH_TLS
+
 struct nc_client_ssh_opts {
+    char *knownhosts_path;  /**< path to known_hosts file */
+    NC_SSH_KNOWNHOSTS_MODE knownhosts_mode; /**< implies whether to check known_hosts or not */
+
     /* SSH authentication method preferences */
     struct {
         NC_SSH_AUTH_TYPE type;
@@ -85,13 +335,11 @@ struct nc_client_ssh_opts {
     uint16_t key_count;
 
     /* SSH authentication callbacks */
-    int (*auth_hostkey_check)(const char *, ssh_session, void *);
     char *(*auth_password)(const char *, const char *, void *);
     char *(*auth_interactive)(const char *, const char *, const char *, int, void *);
     char *(*auth_privkey_passphrase)(const char *, void *);
 
     /* private data for the callbacks */
-    void *auth_hostkey_check_priv;
     void *auth_password_priv;
     void *auth_interactive_priv;
     void *auth_privkey_passphrase_priv;
@@ -99,95 +347,6 @@ struct nc_client_ssh_opts {
     char *username;
 };
 
-struct nc_certificate {
-    char *name;
-    char *cert_data;
-};
-
-struct nc_keystore {
-    struct nc_ks_asym_key {
-        char *name;
-        NC_SSH_PUBKEY_TYPE pubkey_type;
-        char *pub_base64;
-        NC_SSH_KEY_TYPE privkey_type;
-        char *priv_base64;
-        struct {
-            char *name;
-            char *cert_base64;
-        } *certs;
-        uint16_t cert_count;
-    } *asym_keys;
-    uint16_t asym_key_count;
-
-    struct nc_ks_sym_key {
-        char *name;
-        char *base64;
-    } *sym_keys;
-    uint16_t sym_key_count;
-};
-
-struct nc_client_auth {
-    char *username;
-
-    NC_STORE_TYPE ks_type;
-    union {
-        struct {
-            struct nc_client_auth_pubkey {
-                char *name;
-                NC_SSH_PUBKEY_TYPE pubkey_type;
-                char *pub_base64;
-            } *pubkeys;
-            uint16_t pubkey_count;
-        };
-        char *ts_reference;
-    };
-
-    char *password;
-    char *pam_config_name;
-    char *pam_config_dir;
-    int supports_none;
-};
-
-struct nc_hostkey {
-    char *name;
-
-    NC_STORE_TYPE ks_type;
-    union {
-        struct {
-            NC_SSH_PUBKEY_TYPE pubkey_type;
-            char *pub_base64;
-            NC_SSH_KEY_TYPE privkey_type;
-            char *priv_base64;
-        };
-        struct nc_ks_asym_key *ks_ref;
-    };
-};
-
-/* ACCESS locked, separate locks */
-struct nc_server_ssh_opts {
-    struct nc_hostkey *hostkeys; /* everything in ks */
-    uint16_t hostkey_count;
-
-    struct nc_client_auth *auth_clients;
-    uint16_t client_count;
-
-    char *hostkey_algs;
-    char *encryption_algs;
-    char *kex_algs;
-    char *mac_algs;
-
-    uint16_t auth_attempts;
-    uint16_t auth_timeout;
-};
-
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
-
-# include <openssl/bio.h>
-# include <openssl/ssl.h>
-
-/* ACCESS unlocked */
 struct nc_client_tls_opts {
     char *cert_path;
     char *key_path;
@@ -202,47 +361,7 @@ struct nc_client_tls_opts {
     X509_STORE *crl_store;
 };
 
-/* ACCESS locked, separate locks */
-struct nc_server_tls_opts {
-    char *server_cert;
-    char **trusted_cert_lists;
-    uint16_t trusted_cert_list_count;
-    char *trusted_ca_file;
-    char *trusted_ca_dir;
-    X509_STORE *crl_store;
-
-    struct nc_ctn {
-        uint32_t id;
-        char *fingerprint;
-        NC_TLS_CTN_MAPTYPE map_type;
-        char *name;
-        struct nc_ctn *next;
-    } *ctn;
-};
-
-#endif /* NC_ENABLED_TLS */
-
-/* ACCESS unlocked */
-struct nc_keepalives {
-    int enabled;
-    uint16_t idle_time;
-    uint16_t max_probes;
-    uint16_t probe_interval;
-};
-
-/* ACCESS unlocked */
-struct nc_server_unix_opts {
-    mode_t mode;
-    uid_t uid;
-    gid_t gid;
-};
-
-struct nc_bind {
-    char *address;
-    uint16_t port;
-    int sock;
-    int pollin;
-};
+#endif /* NC_ENABLED_SSH_TLS */
 
 /* ACCESS unlocked */
 struct nc_client_opts {
@@ -265,14 +384,13 @@ struct nc_client_context {
     unsigned int refcount;
     struct nc_client_opts opts;
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
     struct nc_client_ssh_opts ssh_opts;
     struct nc_client_ssh_opts ssh_ch_opts;
-#endif /* NC_ENABLED_SSH */
-#ifdef NC_ENABLED_TLS
+
     struct nc_client_tls_opts tls_opts;
     struct nc_client_tls_opts tls_ch_opts;
-#endif /* NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 };
 
 struct nc_server_opts {
@@ -291,7 +409,7 @@ struct nc_server_opts {
     ATOMIC_T hello_timeout;
     ATOMIC_T idle_timeout;
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
     int (*passwd_auth_clb)(const struct nc_session *session, const char *password, void *user_data);
     void *passwd_auth_data;
     void (*passwd_auth_data_free)(void *data);
@@ -303,43 +421,32 @@ struct nc_server_opts {
     int (*interactive_auth_clb)(const struct nc_session *session, ssh_message msg, void *user_data);
     void *interactive_auth_data;
     void (*interactive_auth_data_free)(void *data);
-#endif
-#ifdef NC_ENABLED_TLS
+
     int (*user_verify_clb)(const struct nc_session *session);
-
-    int (*server_cert_clb)(const char *name, void *user_data, char **cert_path, char **cert_data, char **privkey_path,
-            char **privkey_data, NC_SSH_KEY_TYPE *privkey_type);
-    void *server_cert_data;
-    void (*server_cert_data_free)(void *data);
-
-    int (*server_cert_chain_clb)(const char *name, void *user_data, char ***cert_paths, int *cert_path_count,
-            char ***cert_data, int *cert_data_count);
-    void *server_cert_chain_data;
-    void (*server_cert_chain_data_free)(void *data);
-
-    int (*trusted_cert_list_clb)(const char *name, void *user_data, char ***cert_paths, int *cert_path_count,
-            char ***cert_data, int *cert_data_count);
-    void *trusted_cert_list_data;
-    void (*trusted_cert_list_data_free)(void *data);
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
 
     pthread_rwlock_t config_lock;
-    struct nc_keystore keystore; /**< store for keys/certificates */
+
+#ifdef NC_ENABLED_SSH_TLS
+    struct nc_keystore keystore;        /**< store for server's keys/certificates */
+    struct nc_truststore truststore;    /**< store for server client's keys/certificates */
+#endif /* NC_ENABLED_SSH_TLS */
 
     struct nc_bind *binds;
     struct nc_endpt {
         char *name;
-        int changed;
+#ifdef NC_ENABLED_SSH_TLS
+        char *referenced_endpt_name;
+#endif /* NC_ENABLED_SSH_TLS */
         NC_TRANSPORT_IMPL ti;
         struct nc_keepalives ka;
 
         union {
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
             struct nc_server_ssh_opts *ssh;
-#endif
-#ifdef NC_ENABLED_TLS
+
             struct nc_server_tls_opts *tls;
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
             struct nc_server_unix_opts *unixsock;
         } opts;
     } *endpts;
@@ -349,6 +456,7 @@ struct nc_server_opts {
      *                modify CH clients - READ lock ch_client_lock + ch_client_lock */
     struct nc_ch_client {
         char *name;
+        pthread_t tid;
         struct nc_ch_endpt {
             char *name;
             NC_TRANSPORT_IMPL ti;
@@ -358,12 +466,11 @@ struct nc_server_opts {
             struct nc_keepalives ka;
 
             union {
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
                 struct nc_server_ssh_opts *ssh;
-#endif
-#ifdef NC_ENABLED_TLS
+
                 struct nc_server_tls_opts *tls;
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
             } opts;
         } *ch_endpts;
         uint16_t ch_endpt_count;
@@ -490,7 +597,7 @@ struct nc_session {
         struct {
             int sock;            /**< socket file descriptor */
         } unixsock;              /**< NC_TI_UNIX transport implementation structure */
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
         struct {
             ssh_channel channel;
             ssh_session session;
@@ -498,10 +605,9 @@ struct nc_session {
                                           SSH session, but different SSH channel. If no such session exists, it is NULL.
                                           otherwise there is a ring list of the NETCONF sessions */
         } libssh;
-#endif
-#ifdef NC_ENABLED_TLS
+
         SSL *tls;
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
     } ti;                          /**< transport implementation data */
     char *username;
     char *host;
@@ -548,16 +654,15 @@ struct nc_session {
             pthread_cond_t ch_cond;        /**< Call Home thread condition */
 
             /* server flags */
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
             /* SSH session authenticated */
 #           define NC_SESSION_SSH_AUTHENTICATED 0x10
             /* netconf subsystem requested */
 #           define NC_SESSION_SSH_SUBSYS_NETCONF 0x20
             uint16_t ssh_auth_attempts;    /**< number of failed SSH authentication attempts */
-#endif
-#ifdef NC_ENABLED_TLS
+
             X509 *client_cert;                /**< TLS client certificate if used for authentication */
-#endif
+#endif /* NC_ENABLED_SSH_TLS */
         } server;
     } opts;
 };
@@ -594,7 +699,7 @@ struct nc_ntf_thread_arg {
     void (*free_data)(void *);
 };
 
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 
 /**
  * @brief PAM callback arguments.
@@ -605,51 +710,46 @@ struct nc_pam_thread_arg {
     struct nc_server_ssh_opts *opts; /**< SSH server opts */
 };
 
-#endif
+/**
+ * @brief Converts private key format to a string.
+ * This string is the same, as in a PKCS#1 Private key format, meaning
+ * ---- BEGIN (string) PRIVATE KEY ----. The string can be empty for some types.
+ *
+ * @param[in] format Private key format.
+ * @return String representing the private key or NULL.
+ */
+const char *nc_privkey_format_to_str(NC_PRIVKEY_FORMAT format);
+
+#endif /* NC_ENABLED_SSH_TLS */
 
 void *nc_realloc(void *ptr, size_t size);
 
-struct passwd *nc_getpwuid(uid_t uid, struct passwd *pwd_buf, char **buf, size_t *buf_size);
+struct passwd *nc_getpw(uid_t uid, const char *username, struct passwd *pwd_buf, char **buf, size_t *buf_size);
 
 NC_MSG_TYPE nc_send_msg_io(struct nc_session *session, int io_timeout, struct lyd_node *op);
 
 /**
- * @brief Get the current real time if available and optionally add some time to it.
+ * @brief Get current clock (uses COMPAT_CLOCK_ID) time with an offset.
  *
- * @param[in,out] ts Timespec structure holding time.
- * @param[in] msec Time in milliseconds to be added.
- * @return 0 on success;
- * @return -1 on error.
+ * @param[out] ts Current time offset by @p add_ms.
+ * @param[in] add_ms Number of milliseconds to add.
  */
-int nc_gettimespec_real_add(struct timespec *ts, uint32_t msec);
+void nc_timeouttime_get(struct timespec *ts, uint32_t add_ms);
 
 /**
- * @brief Get the current monotonic time if available and optionally add some time to it.
- *
- * @param[in,out] ts Timespec structure holding time.
- * @param[in] msec Time in milliseconds to be added.
- * @return 0 on success;
- * @return -1 on error.
- */
-int nc_gettimespec_mono_add(struct timespec *ts, uint32_t msec);
-
-/**
- * @brief Get real time difference based on the current time.
+ * @brief Get time difference based on the current time (uses COMPAT_CLOCK_ID).
  *
  * @param[in] ts Timespec structure holding real time from which the current time is going to be subtracted.
  * @return Time difference in milliseconds.
  */
-int32_t nc_difftimespec_real_cur(const struct timespec *ts);
+int32_t nc_timeouttime_cur_diff(const struct timespec *ts);
 
 /**
- * @brief Get monotonic time difference based on the current time.
+ * @brief Get current CLOCK_REALTIME time.
  *
- * @param[in] ts Timespec structure holding monotonic time from which the current time is going to be subtracted.
- * @return Time difference in milliseconds.
+ * @param[out] ts Current real time.
  */
-int32_t nc_difftimespec_mono_cur(const struct timespec *ts);
-
-const char *nc_keytype2str(NC_SSH_KEY_TYPE type);
+void nc_realtime_get(struct timespec *ts);
 
 int nc_sock_configure_keepalive(int sock, struct nc_keepalives *ka);
 
@@ -767,11 +867,10 @@ int nc_sock_listen_inet(const char *address, uint16_t port, struct nc_keepalives
 /**
  * @brief Create a listening socket (AF_UNIX).
  *
- * @param[in] address UNIX address to listen on.
- * @param[in] opts The server options (unix permissions).
+ * @param[in] opts The server options (unix permissions and address of the socket).
  * @return Listening socket, -1 on error.
  */
-int nc_sock_listen_unix(const char *address, const struct nc_server_unix_opts *opts);
+int nc_sock_listen_unix(const struct nc_server_unix_opts *opts);
 
 /**
  * @brief Accept a new connection on a listening socket.
@@ -848,11 +947,7 @@ int nc_client_ch_del_bind(const char *address, uint16_t port, NC_TRANSPORT_IMPL 
  */
 NC_MSG_TYPE nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, struct nc_session **session);
 
-void nc_init(void);
-
-void nc_destroy(void);
-
-#ifdef NC_ENABLED_SSH
+#ifdef NC_ENABLED_SSH_TLS
 
 /**
  * @brief Accept a server Call Home connection on a socket.
@@ -882,18 +977,15 @@ int nc_accept_ssh_session(struct nc_session *session, struct nc_server_ssh_opts 
  * @param[in] session Session structure of the connection.
  * @param[in] opts Endpoint SSH options on which the session was created.
  * @param[in] msg SSH message itself.
+ * @param[in] state State of the authentication.
  * @return 0 if the message was handled, 1 if it is left up to libssh.
  */
-int nc_session_ssh_msg(struct nc_session *session, struct nc_server_ssh_opts *opts, ssh_message msg);
+int nc_session_ssh_msg(struct nc_session *session, struct nc_server_ssh_opts *opts, ssh_message msg, struct nc_auth_state *state);
 
 void nc_server_ssh_clear_opts(struct nc_server_ssh_opts *opts);
 
 void nc_client_ssh_destroy_opts(void);
 void _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts);
-
-#endif /* NC_ENABLED_SSH */
-
-#ifdef NC_ENABLED_TLS
 
 struct nc_session *nc_accept_callhome_tls_sock(int sock, const char *host, uint16_t port, struct ly_ctx *ctx,
         int timeout, const char *peername);
@@ -906,14 +998,14 @@ struct nc_session *nc_accept_callhome_tls_sock(int sock, const char *host, uint1
  * @param[in] timeout Transport operations timeout in msec.
  * @return 1 on success, 0 on timeout, -1 on error.
  */
-int nc_accept_tls_session(struct nc_session *session, int sock, int timeout);
+int nc_accept_tls_session(struct nc_session *session, struct nc_server_tls_opts *opts, int sock, int timeout);
 
 void nc_server_tls_clear_opts(struct nc_server_tls_opts *opts);
 
 void nc_client_tls_destroy_opts(void);
 void _nc_client_tls_destroy_opts(struct nc_client_tls_opts *opts);
 
-#endif /* NC_ENABLED_TLS */
+#endif /* NC_ENABLED_SSH_TLS */
 
 /**
  * Functions
