@@ -1,7 +1,7 @@
 /**
- * @file test_ed25519.c
+ * @file test_ch.c
  * @author Roman Janota <xjanot04@fit.vutbr.cz>
- * @brief libnetconf2 ED25519 key authentication test
+ * @brief libnetconf2 Call-home test
  *
  * @copyright
  * Copyright (c) 2023 CESNET, z.s.p.o.
@@ -27,15 +27,18 @@
 
 #include "tests/config.h"
 
-#define NC_ACCEPT_TIMEOUT 2000
 #define NC_PS_POLL_TIMEOUT 2000
+
+#define NC_ACCEPT_TIMEOUT 2000
 
 struct ly_ctx *ctx;
 
 struct test_state {
     pthread_barrier_t barrier;
+    struct lyd_node *tree;
 };
 
+/* acquire ctx cb for dispatch */
 const struct ly_ctx *
 ch_session_acquire_ctx_cb(void *cb_data)
 {
@@ -43,6 +46,7 @@ ch_session_acquire_ctx_cb(void *cb_data)
     return ctx;
 }
 
+/* release ctx cb for dispatch */
 void
 ch_session_release_ctx_cb(void *cb_data)
 {
@@ -50,6 +54,7 @@ ch_session_release_ctx_cb(void *cb_data)
     return;
 }
 
+/* new session cb for dispatch */
 int
 ch_new_session_cb(const char *client_name, struct nc_session *new_session, void *user_data)
 {
@@ -70,23 +75,31 @@ server_thread(void *arg)
     struct test_state *state = arg;
     struct nc_pollsession *ps;
 
-    (void) arg;
+    /* prepare data for deleting the call-home client */
+    ret = nc_server_config_new_del_ch_client(ctx, "ch", &state->tree);
+    assert_int_equal(ret, 0);
 
+    /* new poll session */
     ps = nc_ps_new();
     assert_non_null(ps);
 
-    /* accept a session and add it to the poll session structure */
     pthread_barrier_wait(&state->barrier);
+    /* create the call-home client thread */
     ret = nc_connect_ch_client_dispatch("ch", ch_session_acquire_ctx_cb,
             ch_session_release_ctx_cb, NULL, ch_new_session_cb, ps);
     assert_int_equal(ret, 0);
 
+    /* poll */
     do {
         ret = nc_ps_poll(ps, NC_PS_POLL_TIMEOUT, NULL);
         if (ret & (NC_PSPOLL_TIMEOUT | NC_PSPOLL_NOSESSIONS)) {
             usleep(500);
         }
     } while (!(ret & NC_PSPOLL_SESSION_TERM));
+
+    /* delete the call-home client, the thread should end */
+    ret = nc_server_config_setup_data(state->tree);
+    assert_int_equal(ret, 0);
 
     nc_ps_clear(ps, 1, NULL);
     nc_ps_free(ps);
@@ -116,6 +129,7 @@ client_thread(void *arg)
     ret = nc_client_ssh_ch_add_keypair(TESTS_DIR "/data/id_ed25519.pub", TESTS_DIR "/data/id_ed25519");
     assert_int_equal(ret, 0);
 
+    /* add call-home bind */
     ret = nc_client_ssh_ch_add_bind_listen("127.0.0.1", 10009);
     assert_int_equal(ret, 0);
 
@@ -156,7 +170,6 @@ static int
 setup_f(void **state)
 {
     int ret;
-    struct lyd_node *tree = NULL;
     struct test_state *test_state;
 
     nc_verbosity(NC_VERB_VERBOSE);
@@ -168,6 +181,7 @@ setup_f(void **state)
     ret = pthread_barrier_init(&test_state->barrier, NULL, 2);
     assert_int_equal(ret, 0);
 
+    test_state->tree = NULL;
     *state = test_state;
 
     /* create new context */
@@ -182,24 +196,22 @@ setup_f(void **state)
     ret = nc_server_config_load_modules(&ctx);
     assert_int_equal(ret, 0);
 
-    ret = nc_server_config_new_ch_address_port(ctx, "ch", "endpt", NC_TI_LIBSSH, "127.0.0.1", "10009", &tree);
+    ret = nc_server_config_new_ch_address_port(ctx, "ch", "endpt", NC_TI_LIBSSH, "127.0.0.1", "10009", &test_state->tree);
     assert_int_equal(ret, 0);
 
-    ret = nc_server_config_new_ssh_ch_hostkey(ctx, "ch", "endpt", "hostkey", TESTS_DIR "/data/key_ecdsa", NULL, &tree);
+    ret = nc_server_config_new_ssh_ch_hostkey(ctx, "ch", "endpt", "hostkey", TESTS_DIR "/data/key_ecdsa", NULL, &test_state->tree);
     assert_int_equal(ret, 0);
 
-    ret = nc_server_config_new_ssh_ch_client_auth_pubkey(ctx, "ch", "endpt", "test_ch", "pubkey", TESTS_DIR "/data/id_ed25519.pub", &tree);
+    ret = nc_server_config_new_ssh_ch_client_auth_pubkey(ctx, "ch", "endpt", "test_ch", "pubkey", TESTS_DIR "/data/id_ed25519.pub", &test_state->tree);
     assert_int_equal(ret, 0);
 
     /* configure the server based on the data */
-    ret = nc_server_config_setup_diff(tree);
+    ret = nc_server_config_setup_data(test_state->tree);
     assert_int_equal(ret, 0);
 
     /* initialize server */
     ret = nc_server_init();
     assert_int_equal(ret, 0);
-
-    lyd_free_all(tree);
 
     return 0;
 }
@@ -215,6 +227,8 @@ teardown_f(void **state)
 
     ret = pthread_barrier_destroy(&test_state->barrier);
     assert_int_equal(ret, 0);
+
+    lyd_free_tree(test_state->tree);
 
     free(*state);
     nc_client_destroy();

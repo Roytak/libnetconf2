@@ -227,6 +227,7 @@ typedef int (*nc_server_ch_new_session_cb)(const char *client_name, struct nc_se
  * @param[in] release_ctx_cb Callback for releasing session context.
  * @param[in] ctx_cb_data Arbitrary user data passed to @p acquire_ctx_cb and @p release_ctx_cb.
  * @param[in] new_session_cb Callback called for every established session on the client.
+ * @param[in] new_session_cb_data Arbitrary user data passed to @p new_session_cb.
  * @return 0 if the thread was successfully created, -1 on error.
  */
 int nc_connect_ch_client_dispatch(const char *client_name, nc_server_ch_session_acquire_ctx_cb acquire_ctx_cb,

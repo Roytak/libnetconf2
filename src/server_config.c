@@ -428,8 +428,6 @@ cleanup:
     return ret;
 }
 
-#ifdef NC_ENABLED_SSH_TLS
-
 static int
 is_listen(const struct lyd_node *node)
 {
@@ -459,6 +457,8 @@ is_ch(const struct lyd_node *node)
 
     return node != NULL;
 }
+
+#ifdef NC_ENABLED_SSH_TLS
 
 static int
 is_ssh(const struct lyd_node *node)
@@ -960,6 +960,8 @@ nc_server_config_listen(struct lyd_node *node, NC_OPERATION op)
     return 0;
 }
 
+#ifdef NC_ENABLED_SSH_TLS
+
 static void
 nc_server_config_ch_del_ssh(struct nc_server_ssh_opts *opts)
 {
@@ -992,20 +994,31 @@ nc_server_config_ch_del_endpt_address(struct nc_ch_endpt *ch_endpt)
     ch_endpt->address = NULL;
 }
 
+#endif /* NC_ENABLED_SSH_TLS */
+
 static void
 nc_server_config_ch_del_endpt(struct nc_ch_client *ch_client, struct nc_ch_endpt *ch_endpt)
 {
     free(ch_endpt->name);
     ch_endpt->name = NULL;
 
+#ifdef NC_ENABLED_SSH_TLS
     nc_server_config_ch_del_endpt_address(ch_endpt);
     if (ch_endpt->sock_pending > -1) {
         close(ch_endpt->sock_pending);
         ch_endpt->sock_pending = -1;
     }
+#endif /* NC_ENABLED_SSH_TLS */
 
-    if (ch_endpt->ti == NC_TI_LIBSSH) {
+    switch (ch_endpt->ti) {
+#ifdef NC_ENABLED_SSH_TLS
+    case NC_TI_LIBSSH:
         nc_server_config_ch_del_ssh(ch_endpt->opts.ssh);
+        break;
+#endif /* NC_ENABLED_SSH_TLS */
+    default:
+        ERRINT;
+        break;
     }
 
     ch_client->ch_endpt_count--;
@@ -1020,11 +1033,24 @@ nc_server_config_ch_del_client(struct nc_ch_client *ch_client)
 {
     uint16_t i, ch_endpt_count;
 
+    pthread_rwlock_wrlock(&server_opts.ch_client_lock);
+
     free(ch_client->name);
     ch_client->name = NULL;
 
-    /* cancel the underlying thread */
-    //pthread_cancel(ch_client->tid);
+    if (ch_client->session) {
+        pthread_mutex_lock(&ch_client->session->opts.server.ch_lock);
+        pthread_cond_signal(&ch_client->session->opts.server.ch_cond);
+        pthread_mutex_unlock(&ch_client->session->opts.server.ch_lock);
+    }
+
+    ch_client->session = NULL;
+
+    pthread_rwlock_unlock(&server_opts.ch_client_lock);
+
+    pthread_join(ch_client->tid, NULL);
+
+    pthread_rwlock_wrlock(&server_opts.ch_client_lock);
 
     ch_endpt_count = ch_client->ch_endpt_count;
     for (i = 0; i < ch_endpt_count; i++) {
@@ -1036,6 +1062,8 @@ nc_server_config_ch_del_client(struct nc_ch_client *ch_client)
         free(server_opts.ch_clients);
         server_opts.ch_clients = NULL;
     }
+
+    pthread_rwlock_unlock(&server_opts.ch_client_lock);
 }
 
 void
@@ -1158,7 +1186,7 @@ nc_server_config_endpoint(const struct lyd_node *node, NC_OPERATION op)
                 goto cleanup;
             }
         }
-    } else {
+    } else if (is_ch(node)) {
         /* ch */
         if (nc_server_config_get_ch_client(node, &ch_client)) {
             ret = 1;
@@ -4075,25 +4103,54 @@ cleanup:
 static int
 nc_server_config_create_netconf_client(const struct lyd_node *node)
 {
+    int ret = 0;
+
     node = lyd_child(node);
     assert(!strcmp(LYD_NAME(node), "name"));
 
-    return nc_server_config_realloc(lyd_get_value(node), (void **)&server_opts.ch_clients, sizeof *server_opts.ch_clients, &server_opts.ch_client_count);
+    /* LOCK */
+    pthread_rwlock_wrlock(&server_opts.ch_client_lock);
+
+    ret = nc_server_config_realloc(lyd_get_value(node), (void **)&server_opts.ch_clients, sizeof *server_opts.ch_clients, &server_opts.ch_client_count);
+    if (ret) {
+        goto cleanup;
+    }
+
+    server_opts.ch_clients[server_opts.ch_client_count - 1].id = ATOMIC_INC_RELAXED(server_opts.new_client_id);
+    server_opts.ch_clients[server_opts.ch_client_count - 1].start_with = NC_CH_FIRST_LISTED;
+    server_opts.ch_clients[server_opts.ch_client_count - 1].max_attempts = 3; // TODO
+
+    pthread_mutex_init(&server_opts.ch_clients[server_opts.ch_client_count - 1].lock, NULL);
+
+cleanup:
+    /* UNLOCK */
+    pthread_rwlock_unlock(&server_opts.ch_client_lock);
+    return ret;
 }
 
 static int
 nc_server_config_netconf_client(const struct lyd_node *node, NC_OPERATION op)
 {
     int ret = 0;
+    struct nc_ch_client *ch_client;
 
     assert(!strcmp(LYD_NAME(node), "netconf-client"));
 
     if (op == NC_OP_CREATE) {
         ret = nc_server_config_create_netconf_client(node);
+        if (ret) {
+            goto cleanup;
+        }
     } else if (op == NC_OP_DELETE) {
+        if (nc_server_config_get_ch_client(node, &ch_client)) {
+            ret = 1;
+            goto cleanup;
+        }
 
+        nc_server_config_ch_del_client(ch_client);
     }
 
+cleanup:
     return ret;
 }
 
@@ -4616,6 +4673,7 @@ nc_server_config_setup_data(const struct lyd_node *data)
 
     /* delete the current configuration */
     nc_server_config_listen(NULL, NC_OP_DELETE);
+    nc_server_config_ch(NULL, NC_OP_DELETE);
 #ifdef NC_ENABLED_SSH_TLS
     nc_server_config_ks_keystore(NULL, NC_OP_DELETE);
     nc_server_config_ts_truststore(NULL, NC_OP_DELETE);

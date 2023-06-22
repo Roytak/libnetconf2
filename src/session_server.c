@@ -104,7 +104,7 @@ nc_server_ch_client_lock(const char *name, const char *endpt_name, NC_TRANSPORT_
     pthread_rwlock_rdlock(&server_opts.ch_client_lock);
 
     for (i = 0; i < server_opts.ch_client_count; ++i) {
-        if (!strcmp(server_opts.ch_clients[i].name, name)) {
+        if (server_opts.ch_clients[i].name && !strcmp(server_opts.ch_clients[i].name, name)) {
             client = &server_opts.ch_clients[i];
             if (!endpt_name && !ti) {
                 /* return only client */
@@ -122,7 +122,7 @@ nc_server_ch_client_lock(const char *name, const char *endpt_name, NC_TRANSPORT_
     }
 
     if (!client) {
-        ERR(NULL, "Call Home client \"%s\" was not found.", name);
+        VRB(NULL, "Call Home client \"%s\" was not found.", name);
 
         /* READ UNLOCK */
         pthread_rwlock_unlock(&server_opts.ch_client_lock);
@@ -2737,6 +2737,17 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
         if (!r) {
             /* we were woken up, something probably happened */
             if (session->status != NC_STATUS_RUNNING) {
+                /* remove the session from the client, since it's gonna be invalid soon */
+                nc_server_ch_client_lock(data->client_name, NULL, 0, &client);
+                if (!client) {
+                    /* no client and session terminating */
+                    VRB(session, "Client and session both terminated, exiting.");
+                    ret = 1;
+                    break;
+                }
+
+                client->session = NULL;
+                nc_server_ch_client_unlock(client);
                 break;
             }
         } else if (r != ETIMEDOUT) {
@@ -2814,6 +2825,9 @@ nc_ch_client_thread(void *arg)
         msgtype = nc_connect_ch_endpt(cur_endpt, data->acquire_ctx_cb, data->release_ctx_cb, data->ctx_cb_data, &session);
 
         if (msgtype == NC_MSG_HELLO) {
+            /* assign the new session to the client */
+            client->session = session;
+
             /* UNLOCK */
             nc_server_ch_client_unlock(client);
 
@@ -2941,11 +2955,10 @@ nc_ch_client_thread(void *arg)
     }
 
 cleanup:
-    VRB(NULL, "Call Home client \"%s\" thread exit.", data->client_name);
+    VRB(session, "Call Home client \"%s\" thread exit.", data->client_name);
     free(cur_endpt_name);
     free(data->client_name);
     free(data);
-    nc_session_free(session, NULL);
     return NULL;
 }
 
@@ -2999,9 +3012,8 @@ nc_connect_ch_client_dispatch(const char *client_name, nc_server_ch_session_acqu
         return -1;
     }
     /* the thread now manages arg */
-
     ch_client->tid = tid;
-    pthread_detach(tid);
+
     return 0;
 }
 
