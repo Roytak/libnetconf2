@@ -508,17 +508,83 @@ int nc_server_config_new_ssh_ch_hostkey(const struct ly_ctx *ctx, const char *ch
 int nc_server_config_new_ssh_ch_client_auth_pubkey(const struct ly_ctx *ctx, const char *ch_client_name, const char *endpt_name,
         const char *user_name, const char *pubkey_name, const char *pubkey_path, struct lyd_node **config);
 
+/**
+ * @brief Deletes a call-home client from the YANG data.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] ch_client_name The name of the client to be deleted from the data.
+ * The client has to be present in the data.
+ * @param[in,out] config Modified configuration YANG data tree.
+ * @return 0 on success, non-zero otherwise.
+ */
 int nc_server_config_new_del_ch_client(const struct ly_ctx *ctx, const char *ch_client_name, struct lyd_node **config);
 
+/**
+ * @brief Creates new YANG data nodes for an asymmetric key in the keystore.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] name Name of the asymmetric key pair.
+ * This name is used to reference the key pair.
+ * @param[in] privkey_path Path to a private key file.
+ * @param[in] pubkey_path Optional path a public key file.
+ * If not supplied, it will be generated from the private key.
+ * @param[in,out] config Configuration YANG data tree. If *config is NULL, it will be created.
+ * Otherwise the new YANG data will be added to the previous data and may override it.
+ * @return 0 on success, non-zero otherwise.
+ */
 int nc_server_config_new_keystore_asym_key(const struct ly_ctx *ctx, const char *name, const char *privkey_path,
         const char *pubkey_path, struct lyd_node **config);
 
+/**
+ * @brief Creates new YANG data nodes for a reference to an asymmetric key located in the keystore.
+ *
+ * This asymmetric key pair will be used as the SSH hostkey.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] endpt_name Arbitrary identifier of an endpoint.
+ * If an endpoint with this identifier already exists, its contents will be changed.
+ * @param[in] hostkey_name Arbitrary identifier of the endpoint's hostkey.
+ * If an endpoint's hostkey with this identifier already exists, its contents will be changed.
+ * @param[in] keystore_reference Name of the asymmetric key pair to be referenced and used as a hostkey.
+ * @param[in,out] config Configuration YANG data tree. If *config is NULL, it will be created.
+ * Otherwise the new YANG data will be added to the previous data and may override it.
+ * @return 0 on success, non-zero otherwise.
+ */
 int nc_server_config_new_ssh_keystore_reference(const struct ly_ctx *ctx, const char *endpt_name, const char *hostkey_name,
         const char *keystore_reference, struct lyd_node **config);
 
+/**
+ * @brief Creates new YANG data nodes for a public key in the truststore.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] bag_name Arbitrary identifier of the public key bag.
+ * This name is used to reference the public keys in the bag.
+ * If a public key bag with this name already exists, its contents will be changed.
+ * @param[in] pubkey_name Arbitrary identifier of the public key.
+ * If a public key with this name already exists, its contents will be changed.
+ * @param[in] pubkey_path Path to a file containing a public key.
+ * @param[in,out] config Configuration YANG data tree. If *config is NULL, it will be created.
+ * Otherwise the new YANG data will be added to the previous data and may override it.
+ * @return 0 on success, non-zero otherwise.
+ */
 int nc_server_config_new_truststore_pubkey(const struct ly_ctx *ctx, const char *bag_name, const char *pubkey_name,
         const char *pubkey_path, struct lyd_node **config);
 
+/**
+ * @brief Creates new YANG data nodes for a reference to a public key bag located in the truststore.
+ *
+ * The public key's located in the bag will be used for client authentication.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] endpt_name Arbitrary identifier of an endpoint.
+ * If an endpoint with this identifier already exists, its contents will be changed.
+ * @param[in] user_name Arbitrary identifier of the endpoint's user.
+ * If an endpoint's user with this identifier already exists, its contents will be changed.
+ * @param[in] truststore_reference Name of the public key bag to be referenced and used for authentication.
+ * @param config Configuration YANG data tree. If *config is NULL, it will be created.
+ * Otherwise the new YANG data will be added to the previous data and may override it.
+ * @return 0 on success, non-zero otherwise.
+ */
 int nc_server_config_new_ssh_truststore_reference(const struct ly_ctx *ctx, const char *endpt_name, const char *user_name,
         const char *truststore_reference, struct lyd_node **config);
 
