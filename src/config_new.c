@@ -34,6 +34,171 @@
 #include "session.h"
 #include "session_p.h"
 
+int
+nc_config_new_delete(struct lyd_node **tree, const char *path_fmt, ...)
+{
+    int ret = 0;
+    va_list ap;
+    char *path = NULL;
+    struct lyd_node *sub = NULL;
+
+    va_start(ap, path_fmt);
+
+    /* create the path from the format */
+    ret = vasprintf(&path, path_fmt, ap);
+    if (ret == -1) {
+        ERRMEM;
+        path = NULL;
+        goto cleanup;
+    }
+
+    /* find the node we want to delete */
+    ret = lyd_find_path(*tree, path, 0, &sub);
+    if (ret) {
+        goto cleanup;
+    }
+
+    lyd_free_tree(sub);
+
+    /* set the node to top level container */
+    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+    /* add all default nodes */
+    ret = lyd_new_implicit_tree(*tree, LYD_IMPLICIT_NO_STATE, NULL);
+    if (ret) {
+        goto cleanup;
+    }
+
+cleanup:
+    free(path);
+    va_end(ap);
+    return ret;
+}
+
+int
+nc_config_new_create(const struct ly_ctx *ctx, struct lyd_node **tree, const char *value, const char *path_fmt, ...)
+{
+    int ret = 0;
+    va_list ap;
+    char *path = NULL;
+
+    va_start(ap, path_fmt);
+
+    /* create the path from the format */
+    ret = vasprintf(&path, path_fmt, ap);
+    if (ret == -1) {
+        ERRMEM;
+        path = NULL;
+        goto cleanup;
+    }
+
+    /* create the nodes in the path */
+    ret = lyd_new_path(*tree, ctx, path, value, LYD_NEW_PATH_UPDATE, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+    /* set the node to the top level node */
+    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+    /* add all default nodes */
+    ret = lyd_new_implicit_tree(*tree, LYD_IMPLICIT_NO_STATE, NULL);
+    if (ret) {
+        goto cleanup;
+    }
+
+cleanup:
+    free(path);
+    va_end(ap);
+    return ret;
+}
+
+int
+nc_config_new_create_append(const struct ly_ctx *ctx, const char *parent_path, const char *child_name,
+        const char *value, struct lyd_node **tree)
+{
+    int ret = 0;
+    char *path = NULL;
+
+    /* create the path by appending child to the parent path */
+    ret = asprintf(&path, "%s/%s", parent_path, child_name);
+    if (ret == -1) {
+        ERRMEM;
+        path = NULL;
+        goto cleanup;
+    }
+
+    /* create the nodes in the path */
+    ret = lyd_new_path(*tree, ctx, path, value, LYD_NEW_PATH_UPDATE, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+    /* set the node to the top level node */
+    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+    /* add all default nodes */
+    ret = lyd_new_implicit_tree(*tree, LYD_IMPLICIT_NO_STATE, NULL);
+    if (ret) {
+        goto cleanup;
+    }
+
+cleanup:
+    free(path);
+    return ret;
+}
+
+int
+nc_config_new_check_delete(struct lyd_node **tree, const char *path_fmt, ...)
+{
+    int ret = 0;
+    va_list ap;
+    char *path = NULL;
+    struct lyd_node *sub = NULL;
+
+    va_start(ap, path_fmt);
+
+    /* create the path from the format */
+    ret = vasprintf(&path, path_fmt, ap);
+    if (ret == -1) {
+        ERRMEM;
+        path = NULL;
+        goto cleanup;
+    }
+
+    /* find the node we want to delete */
+    ret = lyd_find_path(*tree, path, 0, &sub);
+    if ((ret == LY_EINCOMPLETE) || (ret == LY_ENOTFOUND)) {
+        ret = 0;
+        goto cleanup;
+    } else if (ret) {
+        ERR(NULL, "Unable to delete node in the path \"%s\".", path);
+        goto cleanup;
+    }
+
+    lyd_free_tree(sub);
+
+    /* set the node to top level container */
+    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
+    if (ret) {
+        goto cleanup;
+    }
+
+cleanup:
+    free(path);
+    va_end(ap);
+    return ret;
+}
+
 #ifdef NC_ENABLED_SSH_TLS
 
 const char *
@@ -671,7 +836,7 @@ cleanup:
 }
 
 API int
-nc_server_config_new_ch_address_port(const struct ly_ctx *ctx, const char *ch_client_name, const char *endpt_name,
+nc_server_config_new_ch_address_port(const struct ly_ctx *ctx, const char *client_name, const char *endpt_name,
         NC_TRANSPORT_IMPL transport, const char *address, const char *port, struct lyd_node **config)
 {
     int ret = 0;
@@ -693,12 +858,12 @@ nc_server_config_new_ch_address_port(const struct ly_ctx *ctx, const char *ch_cl
         goto cleanup;
     }
 
-    ret = nc_config_new_create(ctx, config, address, address_fmt, ch_client_name, endpt_name);
+    ret = nc_config_new_create(ctx, config, address, address_fmt, client_name, endpt_name);
     if (ret) {
         goto cleanup;
     }
 
-    ret = nc_config_new_create(ctx, config, port, port_fmt, ch_client_name, endpt_name);
+    ret = nc_config_new_create(ctx, config, port, port_fmt, client_name, endpt_name);
     if (ret) {
         goto cleanup;
     }
@@ -708,96 +873,41 @@ cleanup:
 }
 
 API int
-nc_server_config_new_del_ch_client(const struct ly_ctx *ctx, const char *ch_client_name, struct lyd_node **config)
+nc_server_config_new_del_endpt(const char *endpt_name, struct lyd_node **config)
 {
-    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, config, 1);
+    NC_CHECK_ARG_RET(NULL, config, 1);
 
-    return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/netconf-client[name='%s']", ch_client_name);
+    if (endpt_name) {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/listen/endpoint[name='%s']", endpt_name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/listen/endpoint");
+    }
 }
 
-int
-nc_config_new_delete(struct lyd_node **tree, const char *path_fmt, ...)
+API int
+nc_server_config_new_del_ch_client(const char *ch_client_name, struct lyd_node **config)
 {
-    int ret = 0;
-    va_list ap;
-    char *path = NULL;
-    struct lyd_node *sub = NULL;
+    NC_CHECK_ARG_RET(NULL, config, 1);
 
-    va_start(ap, path_fmt);
-
-    /* create the path from the format */
-    ret = vasprintf(&path, path_fmt, ap);
-    if (ret == -1) {
-        ERRMEM;
-        path = NULL;
-        goto cleanup;
+    if (ch_client_name) {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/netconf-client[name='%s']", ch_client_name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/netconf-client");
     }
-
-    /* find the node we want to delete */
-    ret = lyd_find_path(*tree, path, 0, &sub);
-    if (ret) {
-        goto cleanup;
-    }
-
-    lyd_free_tree(sub);
-
-    /* set the node to top level container */
-    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
-    if (ret) {
-        goto cleanup;
-    }
-
-    /* add all default nodes */
-    ret = lyd_new_implicit_tree(*tree, LYD_IMPLICIT_NO_STATE, NULL);
-    if (ret) {
-        goto cleanup;
-    }
-
-cleanup:
-    free(path);
-    va_end(ap);
-    return ret;
 }
 
-int
-nc_config_new_create(const struct ly_ctx *ctx, struct lyd_node **tree, const char *value, const char *path_fmt, ...)
+API int
+nc_server_config_new_ch_del_endpt(const char *client_name, const char *endpt_name, struct lyd_node **config)
 {
-    int ret = 0;
-    va_list ap;
-    char *path = NULL;
+    NC_CHECK_ARG_RET(NULL, client_name, config, 1);
 
-    va_start(ap, path_fmt);
-
-    /* create the path from the format */
-    ret = vasprintf(&path, path_fmt, ap);
-    if (ret == -1) {
-        ERRMEM;
-        path = NULL;
-        goto cleanup;
+    if (endpt_name) {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/netconf-client[name='%s']/"
+                "endpoints/endpoint[name='%s']", client_name, endpt_name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/netconf-client[name='%s']/"
+                "endpoints/endpoint", client_name);
     }
-
-    /* create the nodes in the path */
-    ret = lyd_new_path(*tree, ctx, path, value, LYD_NEW_PATH_UPDATE, tree);
-    if (ret) {
-        goto cleanup;
-    }
-
-    /* set the node to the top level node */
-    ret = lyd_find_path(*tree, "/ietf-netconf-server:netconf-server", 0, tree);
-    if (ret) {
-        goto cleanup;
-    }
-
-    /* add all default nodes */
-    ret = lyd_new_implicit_tree(*tree, LYD_IMPLICIT_NO_STATE, NULL);
-    if (ret) {
-        goto cleanup;
-    }
-
-cleanup:
-    free(path);
-    va_end(ap);
-    return ret;
 }
 
 API int
@@ -834,25 +944,25 @@ nc_server_config_new_keystore_asym_key(const struct ly_ctx *ctx, const char *nam
     }
 
     ret = nc_config_new_create(ctx, config, pubkey_format, "/ietf-keystore:keystore/asymmetric-keys/"
-        "asymmetric-key[name='%s']/public-key-format", name);
+            "asymmetric-key[name='%s']/public-key-format", name);
     if (ret) {
         goto cleanup;
     }
 
     ret = nc_config_new_create(ctx, config, pubkey, "/ietf-keystore:keystore/asymmetric-keys/"
-        "asymmetric-key[name='%s']/public-key", name);
+            "asymmetric-key[name='%s']/public-key", name);
     if (ret) {
         goto cleanup;
     }
 
     ret = nc_config_new_create(ctx, config, privkey_format, "/ietf-keystore:keystore/asymmetric-keys/"
-        "asymmetric-key[name='%s']/private-key-format", name);
+            "asymmetric-key[name='%s']/private-key-format", name);
     if (ret) {
         goto cleanup;
     }
 
     ret = nc_config_new_create(ctx, config, privkey, "/ietf-keystore:keystore/asymmetric-keys/"
-        "asymmetric-key[name='%s']/cleartext-private-key", name);
+            "asymmetric-key[name='%s']/cleartext-private-key", name);
     if (ret) {
         goto cleanup;
     }
@@ -861,6 +971,18 @@ cleanup:
     free(privkey);
     free(pubkey);
     return ret;
+}
+
+API int
+nc_server_config_new_del_keystore_asym_key(const char *name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, config, 1);
+
+    if (name) {
+        return nc_config_new_delete(config, "/ietf-keystore:keystore/asymmetric-keys/asymmetric-key[name='%s']", name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-keystore:keystore/asymmetric-keys/asymmetric-key");
+    }
 }
 
 API int
@@ -887,13 +1009,13 @@ nc_server_config_new_truststore_pubkey(const struct ly_ctx *ctx, const char *bag
     }
 
     ret = nc_config_new_create(ctx, config, format, "/ietf-truststore:truststore/public-key-bags/"
-        "public-key-bag[name='%s']/public-key[name='%s']/public-key-format", bag_name, pubkey_name);
+            "public-key-bag[name='%s']/public-key[name='%s']/public-key-format", bag_name, pubkey_name);
     if (ret) {
         goto cleanup;
     }
 
     ret = nc_config_new_create(ctx, config, pubkey, "/ietf-truststore:truststore/public-key-bags/"
-        "public-key-bag[name='%s']/public-key[name='%s']/public-key", bag_name, pubkey_name);
+            "public-key-bag[name='%s']/public-key[name='%s']/public-key", bag_name, pubkey_name);
     if (ret) {
         goto cleanup;
     }
@@ -903,4 +1025,222 @@ cleanup:
     return ret;
 }
 
+API int
+nc_server_config_new_del_truststore_pubkey(const char *bag_name,
+        const char *pubkey_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, bag_name, config, 1);
+
+    if (pubkey_name) {
+        return nc_config_new_delete(config, "/ietf-truststore:truststore/public-key-bags/"
+                "public-key-bag[name='%s']/public-key[name='%s']", bag_name, pubkey_name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-truststore:truststore/public-key-bags/"
+                "public-key-bag[name='%s']/public-key", bag_name);
+    }
+}
+
+API int
+nc_server_config_new_truststore_cert(const struct ly_ctx *ctx, const char *bag_name, const char *cert_name,
+        const char *cert_path, struct lyd_node **config)
+{
+    int ret = 0;
+    char *cert = NULL;
+
+    NC_CHECK_ARG_RET(NULL, ctx, bag_name, cert_name, cert_path, config, 1);
+
+    ret = nc_server_config_new_read_certificate(cert_path, &cert);
+    if (ret) {
+        goto cleanup;
+    }
+
+    ret = nc_config_new_create(ctx, config, cert, "/ietf-truststore:truststore/certificate-bags/"
+            "certificate-bag[name='%s']/certificate[name='%s']/cert-data", bag_name, cert_name);
+    if (ret) {
+        goto cleanup;
+    }
+
+cleanup:
+    free(cert);
+    return ret;
+}
+
+API int
+nc_server_config_new_del_truststore_cert(const char *bag_name,
+        const char *cert_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, bag_name, config, 1);
+
+    if (cert_name) {
+        return nc_config_new_delete(config, "/ietf-truststore:truststore/certificate-bags/"
+            "certificate-bag[name='%s']/certificate[name='%s']", bag_name, cert_name);
+    } else {
+        return nc_config_new_delete(config, "/ietf-truststore:truststore/certificate-bags/"
+            "certificate-bag[name='%s']/certificate", bag_name);
+    }
+}
+
 #endif /* NC_ENABLED_SSH_TLS */
+
+API int
+nc_server_config_new_ch_persistent(const struct ly_ctx *ctx, const char *ch_client_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, config, 1);
+
+    /* delete periodic tree if exists */
+    if (nc_config_new_check_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic", ch_client_name)) {
+        return 1;
+    }
+
+    return nc_config_new_create(ctx, config, NULL, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/persistent", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_period(const struct ly_ctx *ctx, const char *ch_client_name, uint16_t period,
+        struct lyd_node **config)
+{
+    char buf[6] = {0};
+
+    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, period, 1);
+
+    /* delete persistent tree if exists */
+    if (nc_config_new_check_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/persistent", ch_client_name)) {
+        return 1;
+    }
+
+    sprintf(buf, "%u", period);
+    return nc_config_new_create(ctx, config, buf, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/period", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_del_period(const char *ch_client_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ch_client_name, config, 1);
+
+    return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/period", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_anchor_time(const struct ly_ctx *ctx, const char *ch_client_name,
+        const char *anchor_time, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, anchor_time, 1);
+
+    /* delete persistent tree if exists */
+    if (nc_config_new_check_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/persistent", ch_client_name)) {
+        return 1;
+    }
+
+    return nc_config_new_create(ctx, config, anchor_time, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/anchor-time", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_del_anchor_time(const char *ch_client_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ch_client_name, config, 1);
+
+    return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/anchor-time", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_idle_timeout(const struct ly_ctx *ctx, const char *ch_client_name,
+        uint16_t idle_timeout, struct lyd_node **config)
+{
+    char buf[6] = {0};
+
+    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, 1);
+
+    /* delete persistent tree if exists */
+    if (nc_config_new_check_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/persistent", ch_client_name)) {
+        return 1;
+    }
+
+    sprintf(buf, "%u", idle_timeout);
+    return nc_config_new_create(ctx, config, buf, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/idle-timeout", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_del_idle_timeout(const char *ch_client_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ch_client_name, config, 1);
+
+    return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/connection-type/periodic/idle-timeout", ch_client_name);
+}
+
+API int
+nc_server_config_new_ch_reconnect_strategy(const struct ly_ctx *ctx, const char *ch_client_name,
+        NC_CH_START_WITH start_with, uint16_t max_wait, uint8_t max_attempts, struct lyd_node **config)
+{
+    int ret = 0;
+    char *path = NULL;
+    char buf[6] = {0};
+    const char *start_with_val;
+
+    NC_CHECK_ARG_RET(NULL, ctx, ch_client_name, config, 1);
+
+    /* prepared the path */
+    if (asprintf(&path, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/reconnect-strategy", ch_client_name) == -1) {
+        ERRMEM;
+        path = NULL;
+        ret = 1;
+        goto cleanup;
+    }
+
+    if (start_with) {
+        /* get string value from enum */
+        if (start_with == NC_CH_FIRST_LISTED) {
+            start_with_val = "first-listed";
+        } else if (start_with == NC_CH_LAST_CONNECTED) {
+            start_with_val = "last-connected";
+        } else {
+            start_with_val = "random-selection";
+        }
+
+        ret = nc_config_new_create_append(ctx, path, "start-with", start_with_val, config);
+        if (ret) {
+            goto cleanup;
+        }
+    }
+
+    if (max_attempts) {
+        sprintf(buf, "%u", max_attempts);
+        ret = nc_config_new_create_append(ctx, path, "max-attempts", buf, config);
+        if (ret) {
+            goto cleanup;
+        }
+        memset(buf, 0, 6);
+    }
+
+    if (max_wait) {
+        sprintf(buf, "%u", max_wait);
+        ret = nc_config_new_create_append(ctx, path, "max-wait", buf, config);
+        if (ret) {
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    free(path);
+    return ret;
+}
+
+API int
+nc_server_config_new_ch_del_reconnect_strategy(const char *ch_client_name, struct lyd_node **config)
+{
+    NC_CHECK_ARG_RET(NULL, ch_client_name, config, 1);
+
+    return nc_config_new_delete(config, "/ietf-netconf-server:netconf-server/call-home/"
+            "netconf-client[name='%s']/reconnect-strategy", ch_client_name);
+}

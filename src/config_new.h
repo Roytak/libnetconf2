@@ -87,7 +87,7 @@ const char * nc_config_new_privkey_format_to_identityref(NC_PRIVKEY_FORMAT forma
 /**
  * @brief Creates YANG data nodes in a path and gives the final node a value.
  *
- * @param[in] ctx libyang context
+ * @param[in] ctx libyang context.
  * @param[in, out] tree The YANG data tree where the insertion will happen. On success
  * the top level container is always returned.
  * @param[in] value Value assigned to the final node in the path.
@@ -98,6 +98,20 @@ const char * nc_config_new_privkey_format_to_identityref(NC_PRIVKEY_FORMAT forma
 int nc_config_new_create(const struct ly_ctx *ctx, struct lyd_node **tree, const char *value, const char *path_fmt, ...);
 
 /**
+ * @brief Creates new YANG data nodes in a path and gives the final node a value.
+ *
+ * @param[in] ctx libyang context.
+ * @param[in] parent_path Path to the parent node.
+ * @param[in] child_name Name of the parent's child node to be created.
+ * @param[in] value Value to give to the child node.
+ * @param[out] tree YANG data tree where the insertion will happen. On success
+ * the top level container is always returned.
+ * @return 0 on success, 1 otherwise.
+ */
+int nc_config_new_create_append(const struct ly_ctx *ctx, const char *parent_path, const char *child_name,
+        const char *value, struct lyd_node **tree);
+
+/**
  * @brief Deletes a subtree from the YANG data.
  *
  * @param tree YANG data from which the subtree will be deleted.
@@ -106,6 +120,8 @@ int nc_config_new_create(const struct ly_ctx *ctx, struct lyd_node **tree, const
  * @return 0 on success, non-zero otherwise.
  */
 int nc_config_new_delete(struct lyd_node **tree, const char *path_fmt, ...);
+
+int nc_config_new_check_delete(struct lyd_node **tree, const char *path_fmt, ...);
 
 #ifdef __cplusplus
 }

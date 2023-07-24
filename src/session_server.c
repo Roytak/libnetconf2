@@ -2391,128 +2391,6 @@ nc_server_ch_client_endpt_set_keepalives(const char *client_name, const char *en
 }
 
 API int
-nc_server_ch_client_set_conn_type(const char *client_name, NC_CH_CONN_TYPE conn_type)
-{
-    struct nc_ch_client *client;
-
-    NC_CHECK_ARG_RET(NULL, client_name, conn_type, -1);
-
-    /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
-    if (!client) {
-        return -1;
-    }
-
-    if (client->conn_type != conn_type) {
-        client->conn_type = conn_type;
-
-        /* set default options */
-        switch (conn_type) {
-        case NC_CH_PERSIST:
-            /* no options */
-            break;
-        case NC_CH_PERIOD:
-            client->conn.period.period = 60;
-            client->conn.period.anchor_time = 0;
-            client->conn.period.idle_timeout = 120;
-            break;
-        default:
-            ERRINT;
-            break;
-        }
-    }
-
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return 0;
-}
-
-API int
-nc_server_ch_client_periodic_set_period(const char *client_name, uint16_t period)
-{
-    struct nc_ch_client *client;
-
-    NC_CHECK_ARG_RET(NULL, client_name, period, -1);
-
-    /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
-    if (!client) {
-        return -1;
-    }
-
-    if (client->conn_type != NC_CH_PERIOD) {
-        ERR(NULL, "Call Home client \"%s\" is not of periodic connection type.", client_name);
-        /* UNLOCK */
-        nc_server_ch_client_unlock(client);
-        return -1;
-    }
-
-    client->conn.period.period = period;
-
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return 0;
-}
-
-API int
-nc_server_ch_client_periodic_set_anchor_time(const char *client_name, time_t anchor_time)
-{
-    struct nc_ch_client *client;
-
-    NC_CHECK_ARG_RET(NULL, client_name, -1);
-
-    /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
-    if (!client) {
-        return -1;
-    }
-
-    if (client->conn_type != NC_CH_PERIOD) {
-        ERR(NULL, "Call Home client \"%s\" is not of periodic connection type.", client_name);
-        /* UNLOCK */
-        nc_server_ch_client_unlock(client);
-        return -1;
-    }
-
-    client->conn.period.anchor_time = anchor_time;
-
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return 0;
-}
-
-API int
-nc_server_ch_client_periodic_set_idle_timeout(const char *client_name, uint16_t idle_timeout)
-{
-    struct nc_ch_client *client;
-
-    NC_CHECK_ARG_RET(NULL, client_name, -1);
-
-    /* LOCK */
-    nc_server_ch_client_lock(client_name, NULL, 0, &client);
-    if (!client) {
-        return -1;
-    }
-
-    if (client->conn_type != NC_CH_PERIOD) {
-        ERR(NULL, "Call Home client \"%s\" is not of periodic connection type.", client_name);
-        /* UNLOCK */
-        nc_server_ch_client_unlock(client);
-        return -1;
-    }
-
-    client->conn.period.idle_timeout = idle_timeout;
-
-    /* UNLOCK */
-    nc_server_ch_client_unlock(client);
-
-    return 0;
-}
-
-API int
 nc_server_ch_client_set_start_with(const char *client_name, NC_CH_START_WITH start_with)
 {
     struct nc_ch_client *client;
@@ -2668,15 +2546,6 @@ fail:
     return msgtype;
 }
 
-struct nc_ch_client_thread_arg {
-    char *client_name;
-    nc_server_ch_session_acquire_ctx_cb acquire_ctx_cb;
-    nc_server_ch_session_release_ctx_cb release_ctx_cb;
-    void *ctx_cb_data;
-    nc_server_ch_new_session_cb new_session_cb;
-    void *new_session_cb_data;
-};
-
 static struct nc_ch_client *
 nc_server_ch_client_with_endpt_lock(const char *name)
 {
@@ -2730,24 +2599,12 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
     }
 
     do {
-        nc_timeouttime_get(&ts, NC_CH_NO_ENDPT_WAIT);
-
+        nc_timeouttime_get(&ts, NC_CH_THREAD_IDLE_TIMEOUT_SLEEP);
         /* CH COND WAIT */
         r = pthread_cond_clockwait(&session->opts.server.ch_cond, &session->opts.server.ch_lock, COMPAT_CLOCK_ID, &ts);
         if (!r) {
             /* we were woken up, something probably happened */
             if (session->status != NC_STATUS_RUNNING) {
-                /* remove the session from the client, since it's gonna be invalid soon */
-                nc_server_ch_client_lock(data->client_name, NULL, 0, &client);
-                if (!client) {
-                    /* no client and session terminating */
-                    VRB(session, "Client and session both terminated, exiting.");
-                    ret = 1;
-                    break;
-                }
-
-                client->session = NULL;
-                nc_server_ch_client_unlock(client);
                 break;
             }
         } else if (r != ETIMEDOUT) {
@@ -2768,7 +2625,7 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
         }
 
         if (client->conn_type == NC_CH_PERIOD) {
-            idle_timeout = client->conn.period.idle_timeout;
+            idle_timeout = client->idle_timeout;
         } else {
             idle_timeout = 0;
         }
@@ -2795,85 +2652,155 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
     return ret;
 }
 
+/**
+ * @brief Waits for some amount of time while reacting to signals about terminating a Call Home thread.
+ *
+ * @param[in] session An established session.
+ * @param[in] data Call Home thread's data.
+ * @param[in] cond_wait_time Time in seconds to sleep for, after which a reconnect is attempted.
+ *
+ * @return 0 if the thread should stop running, 1 if it should continue.
+ */
+static int
+nc_server_ch_client_thread_is_running_wait(struct nc_session *session, struct nc_ch_client_thread_arg *data, uint64_t cond_wait_time)
+{
+    struct timespec ts;
+    int ret = 0, thread_running;
+
+    /* COND LOCK */
+    pthread_mutex_lock(&data->cond_lock);
+    /* get reconnect timeout in ms */
+    nc_timeouttime_get(&ts, cond_wait_time * 1000);
+    while (!ret && data->thread_running) {
+        ret = pthread_cond_clockwait(&data->cond, &data->cond_lock, COMPAT_CLOCK_ID, &ts);
+    }
+
+    thread_running = data->thread_running;
+    /* COND UNLOCK */
+    pthread_mutex_unlock(&data->cond_lock);
+
+    if (!thread_running) {
+        /* thread is terminating */
+        VRB(session, "Call Home thread signaled to exit, client \"%s\" probably removed.", data->client_name);
+        ret = 0;
+    } else if (ret == ETIMEDOUT) {
+        /* time to reconnect */
+        VRB(session, "Call Home client \"%s\" timeout of %" PRIu64 " seconds expired, reconnecting.", data->client_name, cond_wait_time);
+        ret = 1;
+    } else if (ret) {
+        ERR(session, "Pthread condition timedwait failed (%s).", strerror(ret));
+        ret = 0;
+    }
+
+    return ret;
+}
+
+/**
+ * @brief Checks if a Call Home thread should terminate.
+ *
+ * Checks the shared boolean variable thread_running. This should be done everytime
+ * before entering a critical section.
+ *
+ * @param[in] data Call Home thread's data.
+ *
+ * @return 0 if the thread should stop running, -1 if it can continue.
+ */
+static int
+nc_server_ch_client_thread_is_running(struct nc_ch_client_thread_arg *data)
+{
+    int ret = -1;
+
+    /* COND LOCK */
+    pthread_mutex_lock(&data->cond_lock);
+    if (!data->thread_running) {
+        /* thread should stop running */
+        ret = 0;
+    }
+    /* COND UNLOCK */
+    pthread_mutex_unlock(&data->cond_lock);
+
+    return ret;
+}
+
 static void *
 nc_ch_client_thread(void *arg)
 {
     struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
     NC_MSG_TYPE msgtype;
     uint8_t cur_attempts = 0;
-    uint16_t next_endpt_index;
+    uint16_t next_endpt_index, max_wait;
     char *cur_endpt_name = NULL;
     struct nc_ch_endpt *cur_endpt;
     struct nc_session *session = NULL;
     struct nc_ch_client *client;
-    uint32_t client_id, reconnect_in;
+    uint32_t reconnect_in;
 
     /* LOCK */
     client = nc_server_ch_client_with_endpt_lock(data->client_name);
-    if (!client) {
-        goto cleanup;
-    }
-    client_id = client->id;
+    assert(client);
 
     cur_endpt = &client->ch_endpts[0];
     cur_endpt_name = strdup(cur_endpt->name);
 
     while (1) {
+        if (!nc_server_ch_client_thread_is_running(data)) {
+            /* thread should stop running */
+            break;
+        }
+
         if (!cur_attempts) {
             VRB(NULL, "Call Home client \"%s\" endpoint \"%s\" connecting...", data->client_name, cur_endpt_name);
         }
         msgtype = nc_connect_ch_endpt(cur_endpt, data->acquire_ctx_cb, data->release_ctx_cb, data->ctx_cb_data, &session);
 
         if (msgtype == NC_MSG_HELLO) {
-            /* assign the new session to the client */
-            client->session = session;
-
             /* UNLOCK */
             nc_server_ch_client_unlock(client);
 
-            VRB(NULL, "Call Home client \"%s\" session %u established.", data->client_name, session->id);
+            if (!nc_server_ch_client_thread_is_running(data)) {
+                /* thread should stop running */
+                goto cleanup;
+            }
+
+            /* run while the session is established */
+            VRB(session, "Call Home client \"%s\" session %u established.", data->client_name, session->id);
             if (nc_server_ch_client_thread_session_cond_wait(session, data)) {
                 goto cleanup;
             }
-            VRB(NULL, "Call Home client \"%s\" session terminated.", data->client_name);
+
+            VRB(session, "Call Home client \"%s\" session terminated.", data->client_name);
+            if (!nc_server_ch_client_thread_is_running(data)) {
+                /* thread should stop running */
+                goto cleanup;
+            }
 
             /* LOCK */
             client = nc_server_ch_client_with_endpt_lock(data->client_name);
-            if (!client) {
-                goto cleanup;
-            }
-            if (client->id != client_id) {
-                nc_server_ch_client_unlock(client);
-                goto cleanup;
-            }
+            assert(client);
 
             /* session changed status -> it was disconnected for whatever reason,
              * persistent connection immediately tries to reconnect, periodic connects at specific times */
             if (client->conn_type == NC_CH_PERIOD) {
-                if (client->conn.period.anchor_time) {
+                if (client->anchor_time) {
                     /* anchored */
-                    reconnect_in = (time(NULL) - client->conn.period.anchor_time) % (client->conn.period.period * 60);
+                    reconnect_in = (time(NULL) - client->anchor_time) % (client->period * 60);
                 } else {
                     /* fixed timeout */
-                    reconnect_in = client->conn.period.period * 60;
+                    reconnect_in = client->period * 60;
                 }
 
                 /* UNLOCK */
                 nc_server_ch_client_unlock(client);
 
-                /* sleep until we should reconnect TODO wake up sometimes to check for new notifications */
-                VRB(NULL, "Call Home client \"%s\" reconnecting in %" PRIu32 " seconds.", data->client_name, reconnect_in);
-                sleep(reconnect_in);
+                /* wait for the timeout to elapse, so we can try to reconnect */
+                VRB(session, "Call Home client \"%s\" reconnecting in %" PRIu32 " seconds.", data->client_name, reconnect_in);
+                if (!nc_server_ch_client_thread_is_running_wait(session, data, reconnect_in)) {
+                    goto cleanup;
+                }
 
                 /* LOCK */
                 client = nc_server_ch_client_with_endpt_lock(data->client_name);
-                if (!client) {
-                    goto cleanup;
-                }
-                if (client->id != client_id) {
-                    nc_server_ch_client_unlock(client);
-                    goto cleanup;
-                }
+                assert(client);
             }
 
             /* set next endpoint to try */
@@ -2896,21 +2823,21 @@ nc_ch_client_thread(void *arg)
             }
 
         } else {
+            /* session was not created, wait a little bit and try again */
+            max_wait = client->max_wait;
+
             /* UNLOCK */
             nc_server_ch_client_unlock(client);
 
-            /* session was not created */
-            sleep(NC_CH_ENDPT_BACKOFF_WAIT);
+            /* wait for max_wait seconds */
+            if (!nc_server_ch_client_thread_is_running_wait(session, data, max_wait)) {
+                /* thread should stop running */
+                goto cleanup;
+            }
 
             /* LOCK */
             client = nc_server_ch_client_with_endpt_lock(data->client_name);
-            if (!client) {
-                goto cleanup;
-            }
-            if (client->id != client_id) {
-                nc_server_ch_client_unlock(client);
-                goto cleanup;
-            }
+            assert(client);
 
             ++cur_attempts;
 
@@ -2923,12 +2850,12 @@ nc_ch_client_thread(void *arg)
 
             if (next_endpt_index >= client->ch_endpt_count) {
                 /* endpoint was removed, start with the first one */
-                VRB(NULL, "Call Home client \"%s\" endpoint \"%s\" removed.", data->client_name, cur_endpt_name);
+                VRB(session, "Call Home client \"%s\" endpoint \"%s\" removed.", data->client_name, cur_endpt_name);
                 next_endpt_index = 0;
                 cur_attempts = 0;
             } else if (cur_attempts == client->max_attempts) {
                 /* we have tried to connect to this endpoint enough times */
-                VRB(NULL, "Call Home client \"%s\" endpoint \"%s\" failed connection attempt limit %" PRIu8 " reached.",
+                VRB(session, "Call Home client \"%s\" endpoint \"%s\" failed connection attempt limit %" PRIu8 " reached.",
                         data->client_name, cur_endpt_name, client->max_attempts);
 
                 /* clear a pending socket, if any */
@@ -2953,6 +2880,8 @@ nc_ch_client_thread(void *arg)
         free(cur_endpt_name);
         cur_endpt_name = strdup(cur_endpt->name);
     }
+    /* UNLOCK if we break out of the loop */
+    nc_server_ch_client_unlock(client);
 
 cleanup:
     VRB(session, "Call Home client \"%s\" thread exit.", data->client_name);
@@ -3003,6 +2932,12 @@ nc_connect_ch_client_dispatch(const char *client_name, nc_server_ch_session_acqu
     arg->ctx_cb_data = ctx_cb_data;
     arg->new_session_cb = new_session_cb;
     arg->new_session_cb_data = new_session_cb_data;
+    /* thread is now running */
+    arg->thread_running = 1;
+    /* initialize the condition */
+    pthread_cond_init(&arg->cond, NULL);
+    /* initialize the mutex */
+    pthread_mutex_init(&arg->cond_lock, NULL);
 
     ret = pthread_create(&tid, NULL, nc_ch_client_thread, arg);
     if (ret) {
@@ -3013,6 +2948,7 @@ nc_connect_ch_client_dispatch(const char *client_name, nc_server_ch_session_acqu
     }
     /* the thread now manages arg */
     ch_client->tid = tid;
+    ch_client->thread_data = arg;
 
     return 0;
 }
