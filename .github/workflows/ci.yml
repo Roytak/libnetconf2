@@ -4,6 +4,7 @@ on:
     branches:
       - master
       - devel
+      - use-mbedtls
   pull_request:
     branches:
       - master
@@ -44,6 +45,18 @@ jobs:
             cc: "gcc",
             options: "-DENABLE_TESTS=ON -DENABLE_DNSSEC=ON",
             packages: "",
+            snaps: "",
+            make-prepend: "",
+            make-target: ""
+          }
+          - {
+            name: "Release, gcc, mbedtls",
+            os: "ubuntu-22.04",
+            build-type: "Release",
+            dep-build-type: "Release",
+            cc: "gcc",
+            options: "-DENABLE_TESTS=ON -DENABLE_DNSSEC=ON",
+            packages: "libmbedtls-dev",
             snaps: "",
             make-prepend: "",
             make-target: ""
